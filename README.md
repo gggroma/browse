@@ -1,3 +1,9 @@
+> Maintained fork with local browser controls,
+> branch `dev-group-controls`, checked out at `.`.
+> Use the [fork build and Chrome update instructions](#fork-build-and-chrome-updates)
+> below for the enhanced version. Upstream install/update commands elsewhere in
+> this README install stock Browse and do not include these group controls.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.png">
   <img src="assets/banner-light.png" alt="browse: let your AI agents use your real browser. An isometric desk computer whose screen shows a web browser with an agent's tab group, cabled to a small relay box.">
@@ -349,14 +355,15 @@ displays `M`. Identical display labels never combine concurrent sessions.
 - User/shared groups, foreign members, and read-only-session mutations are refused.
 - Explicit names survive automatic regrouping and service-worker reconnection.
 
-Build the extension with the pinned Bun version and `bun run build`. Bundle the
-client through `cli/bundle` or the normal CLI build. Load this checkout's `dist`
+Build both components with the pinned Bun version and
+`bun scripts/build-local.ts`; the stock CLI build does not stamp the local identity. Load this checkout's `dist`
 as the unpacked "browse - local group controls" extension in the existing Chrome profile. Do not edit the
 store-managed extension files or copy a browser profile. A loaded local build
 is required: the stock extension advertises no `session-groups` capability.
 
-In this setup, `scripts/local-browse.ps1` selects the dedicated runtime
-folder beside this checkout and port 19990. Both Codex and Vibe should use the
+In this setup, `scripts/local-browse.ps1` selects the persistent runtime
+`../.ai-folder/tools/browse-group-controls-runtime` and port 19990.
+Moving the source checkout does not move or reset browser pairing. Both Codex and Vibe should use the
 same built `cli/dist/cli.mjs mcp` with those environment values. This isolates
 the enhanced installation from the stock relay while an earlier chat finishes.
 Automatic updates to the stock installation do not deploy this local checkout.
@@ -370,3 +377,104 @@ triaged. Live Chrome verification passed on 2026-11-16: separate concurrent C/C/
 groups, explicit rename/expand/collapse, tab churn, normal form fill/Submit and
 complete tab/group cleanup. The user's selected tab remained unchanged. Both
 saved Codex and Vibe registrations advertised all 14 enhanced MCP tools.
+
+## Fork build and Chrome updates
+
+This branch preserves the previously tested TypeScript backend and adds explicit
+session group controls. The fork's upstream `dev` branch is separate and may
+contain newer backend changes; review and integrate those deliberately. Do not
+reset this branch to upstream or run the stock installer to update this fork.
+The existing implementation commits are retained in this branch's history.
+
+### Build from the fork
+
+Use Node 22.19 or newer and the packageManager-pinned Bun 1.4.4. Run from the
+existing background shell, without launching a new terminal or browser window:
+
+```powershell
+Set-Location .
+git switch dev-group-controls
+git pull --ff-only origin dev-group-controls
+bun install --frozen-lockfile
+Push-Location cli
+try { bun install --frozen-lockfile } finally { Pop-Location }
+bun scripts/build-local.ts
+```
+
+Check every command's exit status and stop on failure. The explicit local build
+produces `dist/` and `cli/dist/cli.mjs` with the enhanced version/build identity.
+Generated builds, dependencies and one-time pairing files are not committed.
+Before changing extension or relay behavior, update the local version/build ID
+in `scripts/build-local.ts` and the extension version/version_name in
+`public/manifest.json`. Keep both components on the same release identity; do
+not reuse a build ID for different implementation code. The current identity is
+retained because this move changes setup scripts and documentation only.
+
+### Update the extension already loaded in Chrome
+
+The currently paired extension is loaded from
+`../.ai-folder/tools/browse-group-controls/dist`. That path is an
+installation directory retained for continuity; `.` is now
+the canonical source. Chrome Reload rereads the directory originally loaded,
+so building the new checkout alone does not update that installed extension.
+
+1. Finish browser work and verify no enhanced-runtime sessions or owned tabs
+   remain: `./scripts/local-browse.ps1 status --json`.
+2. Build successfully using the commands above.
+3. Copy the new extension files to the existing installation directory:
+
+   ```powershell
+   Copy-Item -Path ./dist/* -Destination ../.ai-folder/tools/browse-group-controls/dist -Recurse
+   ```
+
+4. In Chrome, open Extensions > Manage Extensions. Find
+   `browse - local group controls` and click its circular Reload button once.
+   Browser automation cannot access that protected management page; this click
+   belongs to the user. Do not reload the stock extension or reinstall both.
+5. Run `./scripts/local-browse.ps1 status --json`; verify the extension is
+   connected, protocol-compatible, and reports the expected local build.
+6. If relay/client code changed, first ensure its session list is empty, then
+   restart only this isolated runtime with `./scripts/local-browse.ps1 relay restart`.
+   Recheck status and `session_group` before resuming work. Never restart another
+   chat's active relay or the separate stock relay.
+
+Pairing normally survives Reload. If this build is genuinely unpaired, run
+`bun scripts/prepare-local.ts`, copy only `dist/relay-pairing.json` to the existing
+installation's `dist/`, and Reload that local extension once while the relay is
+running. The code expires after one hour; regenerate it after a delayed handoff.
+After connected status is verified, remove those exact spent pairing files.
+Never commit or print pairing codes, tokens or browser profile data.
+
+For a fresh installation, load `./dist` unpacked instead.
+Do not keep duplicate local copies enabled. The Chrome Web Store does not update
+an unpacked fork; repeat this build/copy/Reload procedure for future changes.
+
+### Shared agent setup
+
+Both clients launch `C:/Program Files/nodejs/node.exe` with arguments
+`./cli/dist/cli.mjs`, `mcp`, and these environment values:
+
+```text
+OPENCODE_BROWSER_HOME=../.ai-folder/tools/browse-group-controls-runtime
+OPENCODE_BROWSER_PORT=19990
+```
+
+Codex registers this under `[mcp_servers.browse]` in its user config. Mistral Vibe
+uses a stdio `[[mcp_servers]]` entry named `browse`. Preserve other config fields
+and credentials. Existing chats can cache old tool schemas: use the matching
+`./scripts/local-browse.ps1` immediately, or load the saved registration through a
+new chat or supported MCP refresh. Do not restart unrelated chats.
+
+The canonical browser-interactions skill remains in
+`~/.codex/skills/browser-interactions`; Vibe discovers that same
+folder through its `skill_paths`. All browser-capable skills inherit this route:
+Codex uses native ChatGPT Chrome first and this fork as its permitted backup;
+Mistral Vibe uses this fork as its primary and only browser route. Native Codex
+groups use the single U+1F50E icon; Browse groups use C/M. Keep explicit, unique
+lowercase session IDs on every call, verify group state after tab churn, and
+close/delete only owned tabs and sessions immediately after browser work.
+
+Do not publish directly to upstream. Push this development branch to the fork
+only after review and relevant checks; upstream synchronization is a separate
+reviewed change. No credentials, runtime state or built extension files belong
+in the public repository.
