@@ -366,4 +366,7 @@ checks 37 passed; focused MCP/relay checks 31 passed; both TypeScript checks and
 extension/client builds passed. The full CLI run reported 689 passed, 39 skipped
 and 66 failed, including POSIX installer, permission and signal assumptions.
 Those broader failures are not a green CLI gate and were not all independently
-triaged. Live Chrome verification remains pending local extension activation.
+triaged. Live Chrome verification passed on 2026-11-16: separate concurrent C/C/M
+groups, explicit rename/expand/collapse, tab churn, normal form fill/Submit and
+complete tab/group cleanup. The user's selected tab remained unchanged. Both
+saved Codex and Vibe registrations advertised all 14 enhanced MCP tools.
