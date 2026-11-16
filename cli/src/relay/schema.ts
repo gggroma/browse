@@ -586,3 +586,12 @@ export const ErrorEnvelope = Schema.Struct({
 })
 
 export interface ErrorEnvelope extends Schema.Schema.Type<typeof ErrorEnvelope> {}
+
+/** Session-local controls cannot claim a user tab or focus a browser window. */
+export const SessionGroupRequest = Schema.Struct({ id: Schema.String, title: Schema.optionalKey(Schema.String), collapsed: Schema.optionalKey(Schema.Boolean) })
+export type SessionGroupRequest = Schema.Schema.Type<typeof SessionGroupRequest>
+export const SessionGroupResponse = Schema.Struct({ groups: Schema.Array(Schema.Struct({
+  id: Schema.Number, windowId: Schema.Number, title: Schema.String, collapsed: Schema.Boolean,
+  tabIds: Schema.Array(Schema.Number), blocked: Schema.optionalKey(Schema.String),
+})) })
+export type SessionGroupResponse = Schema.Schema.Type<typeof SessionGroupResponse>

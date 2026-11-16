@@ -1,6 +1,6 @@
 import { Effect, Predicate } from "effect"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
-import { SessionAdoptResponse, SessionContainer, SessionResetResponse, SessionsContainer } from "../relay/schema.ts"
+import { SessionAdoptResponse, SessionContainer, SessionGroupResponse, SessionResetResponse, SessionsContainer } from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   CurrentSessionToolOutput,
@@ -21,6 +21,22 @@ import {
 registerMcpTools({
   order: 200,
   build: (ctx) => [
+    {
+      name: "session_group",
+      description: "Read, rename or collapse only the named session's own tab groups. Codex uses title C; Mistral Vibe uses M. Session IDs stay unique and lowercase. Omit title/collapsed to inspect. Returns verified title, collapsed state and membership; blocked means an active tab or handoff kept the group open. Never focuses tabs/windows or modifies user/shared groups. Pass the explicit owned session ID.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Required owned session ID." },
+        title: { type: "string", minLength: 1, maxLength: 28, description: "Display label C or M, independent of session ID." },
+        collapsed: { type: "boolean", description: "True folds inactive groups; active tabs/handoffs prevent collapse." },
+      }, ["session"]),
+      readOnly: false, destructive: false, idempotent: true, openWorld: false,
+      outputSchema: SessionGroupResponse,
+      handle: (input) => Effect.gen(function* () {
+        const id = requiredStringField(input, "session")
+        const title = optionalStringField(input, "title")
+        const collapsed = optionalBooleanField(input, "collapsed")
+        return yield* ctx.relay.sessionGroup({ id, ...(title === undefined ? {} : { title }), ...(collapsed === undefined ? {} : { collapsed }) })
+      }),
+    },
     {
       name: "session_new",
       description: "Create a browse session and make it your current one. Agents the client names keep theirs; otherwise the current session is shared by every agent on this server.",

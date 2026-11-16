@@ -105,6 +105,78 @@ await until(() => relay.state().status === "connected")
 
 describe("grouping: one group per session", () => {
   beforeEach(() => stub.chrome.storage.local.set({ agentTabsGrouping: "session" }))
+  test("runtime labels stay uppercase while concurrent sessions keep different groups", async () => {
+    await userWindow()
+    const c = await agentTab("c-one")
+    const other = await agentTab("c-two")
+    const m = await agentTab("m-one")
+    expect(c.groupId).not.toBe(other.groupId)
+    expect(group(c.groupId)?.title).toBe(`C${MARKER}`)
+    expect(group(other.groupId)?.title).toBe(`C${MARKER}`)
+    expect(group(m.groupId)?.title).toBe(`M${MARKER}`)
+  })
+
+  test("session group controls rename durably and return collapse and membership", async () => {
+    const { userTab } = await userWindow()
+    const c = await agentTab("c-control")
+    await stub.chrome.tabGroups.update(c.groupId, { collapsed: false })
+    const result = await command("session.group", { sessionId: "c-control", tabIds: [c.tabId], title: "C", collapsed: true })
+    expect(result.groups).toEqual([expect.objectContaining({ id: c.groupId, title: "C", collapsed: true, tabIds: [c.tabId] })])
+    await command("tabs.group", { tabId: c.tabId, sessionId: "c-control" })
+    expect(group(c.groupId)?.title).toBe(`C${MARKER}`)
+    expect(tab(userTab).active).toBe(true)
+  })
+
+  test("session group controls preserve active tabs and pending handoffs", async () => {
+    const { userTab } = await userWindow()
+    const c = await agentTab("c-protected")
+    await stub.chrome.tabs.update(c.tabId, { active: true })
+    // Chrome expands a selected group; the stub does not emulate that side effect.
+    await stub.chrome.tabGroups.update(c.groupId, { collapsed: false })
+    const active = await command("session.group", { sessionId: "c-protected", tabIds: [c.tabId], collapsed: true })
+    expect(active.groups).toEqual([expect.objectContaining({ collapsed: false, blocked: "active-tab" })])
+    expect(tab(c.tabId).active).toBe(true)
+    await stub.chrome.tabs.update(userTab, { active: true })
+    await command("pageStatus.set", { tabId: c.tabId, status: { state: "waiting", owner: "session", sessionId: "c-protected", message: "Login", handoffId: "protected-login" } })
+    const waiting = await command("session.group", { sessionId: "c-protected", tabIds: [c.tabId], collapsed: true })
+    expect(waiting.groups).toEqual([expect.objectContaining({ collapsed: false, blocked: "handoff" })])
+  })
+
+  test("session group controls reject foreign members before renaming", async () => {
+    const { user } = await userWindow()
+    const c = await agentTab("c-isolation")
+    const foreign = await stub.chrome.tabs.create({ windowId: user.id, url: "https://user.example/", active: false })
+    await stub.chrome.tabs.group({ tabIds: [foreign.id], groupId: c.groupId })
+    const id = nextCommand++
+    socket().deliver({ id, method: "session.group", params: { sessionId: "c-isolation", tabIds: [c.tabId], title: "Wrong" } })
+    await until(() => socket().received.some(m => m.id === id))
+    expect(socket().received.find(m => m.id === id)?.error).toContain("another session")
+    expect(group(c.groupId)?.title).toBe(`C${MARKER}`)
+  })
+
+  test("a renamed display title survives a worker restart and regrouping", async () => {
+    await userWindow()
+    const c = await agentTab("c-restored")
+    await command("session.group", { sessionId: "c-restored", tabIds: [c.tabId], title: "Audit" })
+    const { createRelayGrouping } = await import("../../src/background/agent-relay/grouping")
+    const restarted = createRelayGrouping({ log: { add: () => {}, entries: async () => [] }, relayTabs: new Set([c.tabId]), currentSocket: () => socket() as unknown as WebSocket, isReloading: () => false })
+    await restarted.group(c.tabId, "c-restored", socket() as unknown as WebSocket)
+    expect(group(c.groupId)?.title).toBe(`Audit${MARKER}`)
+  })
+
+  test("explicit collapse reports a Chrome failure instead of a successful skip", async () => {
+    await userWindow()
+    const c = await agentTab("c-error")
+    const original = stub.chrome.tabGroups.update
+    stub.chrome.tabGroups.update = async () => { throw new Error("chrome-update-failed") }
+    try {
+      const id = nextCommand++
+      socket().deliver({ id, method: "session.group", params: { sessionId: "c-error", tabIds: [c.tabId], collapsed: true } })
+      await until(() => socket().received.some(m => m.id === id))
+      expect(socket().received.find(m => m.id === id)?.error).toContain("chrome-update-failed")
+    } finally { stub.chrome.tabGroups.update = original }
+  })
+
   test("each session gets its own collapsed group named after it", async () => {
     const { user, userTab } = await userWindow()
     const first = await agentTab("github")

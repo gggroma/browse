@@ -8,7 +8,7 @@ import path from "node:path"
 const directory = path.join(import.meta.dir, "isolated")
 for (const file of fs.readdirSync(directory).filter((name) => name.endsWith(".ts")).sort()) {
   test(`isolated/${file}`, () => {
-    const result = spawnSync(process.execPath, ["test", path.join(directory, file)], { encoding: "utf8", timeout: 60_000 })
+    const result = spawnSync(process.execPath, ["test", path.join(directory, file)], { encoding: "utf8", timeout: 60_000, windowsHide: true })
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
     expect(result.stderr).toMatch(/ 0 fail/)
   }, 70_000)

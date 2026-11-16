@@ -96,6 +96,17 @@ export async function settleTab(tabId: number) {
   if (tab && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE && groups.has(tab.groupId)) await collapseUnlessActive(tab.groupId)
 }
 
+/** Explicit controls propagate Chrome errors and distinguish user activity from a pending handoff. */
+export async function setCollapsed(groupId: number, collapsed: boolean): Promise<"active-tab" | "handoff" | undefined> {
+  const group = await chrome.tabGroups.get(groupId)
+  if (collapsed) {
+    const [active] = await chrome.tabs.query({ active: true, windowId: group.windowId })
+    if (active?.groupId === groupId) return "active-tab"
+    if (await needed(groupId)) return "handoff"
+  }
+  await chrome.tabGroups.update(groupId, { collapsed })
+}
+
 async function collapseUnlessActive(groupId: number) {
   const group = await chrome.tabGroups.get(groupId).catch(() => undefined)
   if (!group) {

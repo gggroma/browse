@@ -89,11 +89,17 @@ export function handleCliRequest(options: {
   readonly response: http.ServerResponse
   readonly pathname: string
   readonly sessions: OpenCodeBrowserSessions
+  readonly sessionGroup?: (input: unknown) => Effect.Effect<object, Error>
   readonly registry: TargetRegistry
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/cli/sessions" && options.request.method === "GET") {
       sendJson(options.response, { sessions: options.sessions.listSummaries() })
+      return
+    }
+    if (options.pathname === "/cli/session/group" && options.request.method === "POST") {
+      if (!options.sessionGroup) throw new Error("Session group controls are unavailable on this relay")
+      sendJson(options.response, yield* options.sessionGroup(yield* readJsonBody(options.request)))
       return
     }
     if (options.pathname === "/cli/session/new" && options.request.method === "POST") {

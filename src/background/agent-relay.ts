@@ -386,6 +386,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     },
     sendCommand: debuggerOps.sendCommand,
     group: grouping.group,
+    sessionGroup: grouping.sessionGroup,
     ungroup: grouping.ungroup,
     consumeCanceledUngroup,
   })

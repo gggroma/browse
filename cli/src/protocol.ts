@@ -137,6 +137,7 @@ const extensionCommandMethodValues = [
   "tabs.create",
   "tabs.remove",
   "tabs.group",
+  "session.group",
   "tabs.ungroup",
   "action.setAttached",
   "action.setBadge",

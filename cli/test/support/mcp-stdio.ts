@@ -12,6 +12,7 @@ export function mcpStdio(options: {
 }) {
   const command = options.command ?? [process.execPath, path.join(import.meta.dir, "..", "..", "src", "main.ts")]
   const child = spawn(command[0]!, [...command.slice(1), "mcp"], {
+    windowsHide: true,
     stdio: ["pipe", "pipe", "ignore"],
     env: {
       ...process.env,

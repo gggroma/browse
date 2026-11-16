@@ -334,3 +334,36 @@ describing the bug or idea, and our agents usually turn it around fast.
 ## License
 
 [MIT](LICENSE)
+
+## Local session group controls
+
+This checkout adds `session_group` to MCP and `session group ID` to the CLI.
+Session IDs stay unique; session `c` or `c-...` displays `C`, and `m` or `m-...`
+displays `M`. Identical display labels never combine concurrent sessions.
+
+- MCP: `session_group` with `session`, optional `title`, and optional `collapsed`.
+- CLI: `session group c-one --title C --collapse`; omit both flags to inspect.
+- Results include actual title, collapsed state, window/group IDs and tab IDs.
+- `blocked: active-tab` or `blocked: handoff` means the requested collapse was deliberately
+  skipped. Do not select another user tab or dismiss a login handoff to force it.
+- User/shared groups, foreign members, and read-only-session mutations are refused.
+- Explicit names survive automatic regrouping and service-worker reconnection.
+
+Build the extension with the pinned Bun version and `bun run build`. Bundle the
+client through `cli/bundle` or the normal CLI build. Load this checkout's `dist`
+as the unpacked "browse - local group controls" extension in the existing Chrome profile. Do not edit the
+store-managed extension files or copy a browser profile. A loaded local build
+is required: the stock extension advertises no `session-groups` capability.
+
+In this setup, `scripts/local-browse.ps1` selects the dedicated runtime
+folder beside this checkout and port 19990. Both Codex and Vibe should use the
+same built `cli/dist/cli.mjs mcp` with those environment values. This isolates
+the enhanced installation from the stock relay while an earlier chat finishes.
+Automatic updates to the stock installation do not deploy this local checkout.
+
+Validation on Windows with Bun 1.4.4: extension suite 155 passed; focused group
+checks 37 passed; focused MCP/relay checks 31 passed; both TypeScript checks and
+extension/client builds passed. The full CLI run reported 689 passed, 39 skipped
+and 66 failed, including POSIX installer, permission and signal assumptions.
+Those broader failures are not a green CLI gate and were not all independently
+triaged. Live Chrome verification remains pending local extension activation.

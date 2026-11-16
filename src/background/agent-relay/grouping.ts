@@ -6,6 +6,7 @@ import {
   autoNamed,
   GROUP_COLOR,
   groupTitle,
+  GROUP_MARKER,
   ownedGroup,
   SESSION_GROUPS_KEY,
   sharedGroup,
@@ -24,13 +25,18 @@ export function createRelayGrouping(deps: {
    * worker restart doesn't put a session's next tab in a second group. Group ids don't survive a browser restart.
    */
   const sessionGroups = new Map<string, number>()
+  const titles = new Map<string, string>()
+  const titlesKey = "agentSessionGroupTitles"
   let sessionGroupsRestored: Promise<void> | undefined
   let recount: ReturnType<typeof setTimeout> | undefined
 
   const restoreSessionGroups = () =>
     (sessionGroupsRestored ??= chrome.storage.local
-      .get(SESSION_GROUPS_KEY)
+      .get([SESSION_GROUPS_KEY, titlesKey])
       .then((stored) => {
+        const labels = stored[titlesKey]
+        if (isJsonObject(labels)) for (const [id, title] of Object.entries(labels))
+          if (typeof title === "string") titles.set(id, title)
         const saved = stored[SESSION_GROUPS_KEY]
         if (!isJsonObject(saved)) return
         for (const [key, groupId] of Object.entries(saved))
@@ -41,7 +47,7 @@ export function createRelayGrouping(deps: {
   const setSessionGroup = (key: string, groupId: number) => {
     if (sessionGroups.get(key) === groupId) return
     sessionGroups.set(key, groupId)
-    void chrome.storage.local.set({ [SESSION_GROUPS_KEY]: Object.fromEntries(sessionGroups) }).catch(() => undefined)
+    void chrome.storage.local.set({ [SESSION_GROUPS_KEY]: Object.fromEntries(sessionGroups), [titlesKey]: Object.fromEntries(titles) }).catch(() => undefined)
   }
 
   const serially = serialQueue()
@@ -116,9 +122,9 @@ export function createRelayGrouping(deps: {
     }
     if (mode === "none") return chrome.tabGroups.TAB_GROUP_ID_NONE
     if (mode === "shared") return serially(() => groupShared(tabId, current))
-    const title = groupTitle(sessionId, tab.url)
     const key = sessionId ?? ""
     await restoreSessionGroups()
+    const title = titles.has(key) ? `${titles.get(key)}${GROUP_MARKER}` : groupTitle(sessionId, tab.url)
     const known = sessionGroups.get(key)
     let target = known === undefined ? undefined : await chrome.tabGroups.get(known).catch(() => undefined)
     // The tab is already in a session group of ours the session has no record of (a worker restart lost it): it is
@@ -202,9 +208,51 @@ export function createRelayGrouping(deps: {
         .filter(([, groupId]) => groupId === removed.id)
         .map(([key]) => key)
       if (!keys.length) return
-      keys.forEach((key) => sessionGroups.delete(key))
-      void chrome.storage.local.set({ [SESSION_GROUPS_KEY]: Object.fromEntries(sessionGroups) }).catch(() => undefined)
+      keys.forEach((key) => { sessionGroups.delete(key); titles.delete(key) })
+      void chrome.storage.local.set({ [SESSION_GROUPS_KEY]: Object.fromEntries(sessionGroups), [titlesKey]: Object.fromEntries(titles) }).catch(() => undefined)
     })
+  }
+
+  /** Ownership comes from relay-held IDs, never a display title. */
+  const sessionGroup = async (params: { sessionId: string; tabIds: number[]; title?: string; collapsed?: boolean }) => {
+    await restoreSessionGroups()
+    if (!params.tabIds.length) return { groups: [] }
+    if (params.tabIds.some(id => !deps.relayTabs.has(id))) throw new Error("Session group contains an unattached tab")
+    if (params.title !== undefined && (!params.title.trim() || params.title.length > 28 || /[\x00-\x1f\x7f\u2063]/.test(params.title)))
+      throw new Error("Group title must contain 1 to 28 visible characters without control markers")
+    const allowed = new Set(params.tabIds)
+    const ids = new Set<number>()
+    for (const id of allowed) {
+      const tab = await chrome.tabs.get(id)
+      if (tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) throw new Error("Session tab is ungrouped; use session grouping")
+      ids.add(tab.groupId)
+    }
+    const groups = []
+    // Check every group before writing, including all of its members.
+    for (const id of ids) {
+      const group = await chrome.tabGroups.get(id)
+      const members = await chrome.tabs.query({ groupId: id })
+      if (!ownedGroup(group.title) || sharedGroup(group.title) || group.shared || members.some(t => t.id === undefined || !allowed.has(t.id)))
+        throw new Error("Group includes shared, user or another session's tabs")
+      groups.push({ group, members })
+    }
+    // Publish the desired title before awaited Chrome calls so automatic regrouping uses it too.
+    if (params.title !== undefined) {
+      titles.set(params.sessionId, params.title)
+      await chrome.storage.local.set({ [titlesKey]: Object.fromEntries(titles) })
+    }
+    const result = []
+    for (const { group } of groups) {
+      const members = await chrome.tabs.query({ groupId: group.id })
+      if (members.some(t => t.id === undefined || !allowed.has(t.id))) throw new Error("Group membership changed; retry after inspection")
+      if (params.title !== undefined) await chrome.tabGroups.update(group.id, { title: `${params.title}${GROUP_MARKER}` })
+      const blocked = params.collapsed === undefined ? undefined : await AgentGroups.setCollapsed(group.id, params.collapsed)
+      const actual = await chrome.tabGroups.get(group.id)
+      if (params.collapsed !== undefined && !blocked && actual.collapsed !== params.collapsed) throw new Error("Group state changed during update; inspect before retrying")
+      result.push({ id: actual.id, windowId: actual.windowId, title: actual.title?.replace(/\u2063+$/, "") ?? "", collapsed: actual.collapsed,
+        tabIds: members.map(t => t.id!), ...(blocked ? { blocked } : {}) })
+    }
+    return { groups: result }
   }
 
   const onBrowserStartup = () => {
@@ -214,6 +262,7 @@ export function createRelayGrouping(deps: {
 
   return {
     group,
+    sessionGroup,
     countShared,
     recountShared,
     renameForPage,

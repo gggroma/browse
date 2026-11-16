@@ -75,6 +75,7 @@ export function createRelayCommands(deps: {
   readonly setUpdateNotice: (notice: AgentRelayUpdate | undefined) => void
   readonly sendCommand: (params: JsonObject | undefined) => Promise<JsonObject>
   readonly group: (tabId: number, sessionId: string | undefined, current: WebSocket) => Promise<number>
+  readonly sessionGroup: (params: { sessionId: string; tabIds: number[]; title?: string; collapsed?: boolean }) => Promise<JsonObject>
   readonly ungroup: (tabId: number, options?: { finished?: boolean; released?: boolean }) => Promise<void>
   /** True for the first `tabs.ungroup` after a debugging-bar cancel of a tab an agent opened: it must stay as it is. */
   readonly consumeCanceledUngroup: (tabId: number) => boolean
@@ -198,6 +199,15 @@ export function createRelayCommands(deps: {
             current,
           ),
         }
+      case "session.group": {
+        if (!Array.isArray(params?.tabIds) || !params.tabIds.every(id => typeof id === "number" && Number.isInteger(id)))
+          throw new Error("Session group requires integer tabIds")
+        if (params.title !== undefined && typeof params.title !== "string") throw new Error("title must be a string")
+        if (params.collapsed !== undefined && typeof params.collapsed !== "boolean") throw new Error("collapsed must be a boolean")
+        return deps.sessionGroup({ sessionId: typeof params.sessionId === "string" ? params.sessionId : "",
+          tabIds: params.tabIds as number[], ...(typeof params.title === "string" ? { title: params.title } : {}),
+          ...(typeof params.collapsed === "boolean" ? { collapsed: params.collapsed } : {}) })
+      }
       case "tabs.ungroup": {
         const tabId = number(params, "tabId")
         // An older relay follows every debugging-bar cancel with this; a tab an agent opened stays grouped and tracked.

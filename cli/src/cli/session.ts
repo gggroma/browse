@@ -73,6 +73,21 @@ const sessionNew = Command.make(
   }),
 ).pipe(Command.withDescription("Create a browse session and make it current"))
 
+const sessionGroup = Command.make("group", {
+  id: Argument.String("id"),
+  title: Flag.String("title").pipe(Flag.optional),
+  collapse: Flag.Boolean("collapse").pipe(Flag.withDefault(false)),
+  expand: Flag.Boolean("expand").pipe(Flag.withDefault(false)),
+}, Effect.fn("Cli.sessionGroup")(function* ({ id, title, collapse, expand }) {
+  if (collapse && expand) throw new Error("Choose either --collapse or --expand")
+  const relay = yield* RelayClient.Service
+  yield* ensureCliRelayAndExtension()
+  yield* emitJson(yield* relay.sessionGroup({ id,
+    ...Option.match(title, { onNone: () => ({}), onSome: (title) => ({ title }) }),
+    ...(collapse || expand ? { collapsed: collapse } : {}),
+  }))
+})).pipe(Command.withDescription("Read/rename/collapse this session's groups without focusing tabs"))
+
 const sessionList = Command.make(
   "list",
   {
@@ -255,6 +270,7 @@ const session = Command.make("session").pipe(
   Command.withDescription("Manage browse sessions"),
   Command.withSubcommands([
     sessionNew,
+    sessionGroup,
     sessionList,
     sessionCurrent,
     sessionUse,

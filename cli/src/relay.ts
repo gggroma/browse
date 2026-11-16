@@ -1,6 +1,7 @@
+import { SessionGroupRequest } from "./relay/schema.ts"
 import crypto from "node:crypto"
 import path from "node:path"
-import { Config, Effect, Option } from "effect"
+import { Config, Effect, Option, Schema } from "effect"
 import type { WebSocket } from "ws"
 import { createAutoUpdater, installedRuntime } from "./update/auto-update.ts"
 import { BrowserLinks, type BrowserLink } from "./relay/browser-links.ts"
@@ -16,7 +17,7 @@ import { createHttpRequestHandler } from "./http-api.ts"
 import { forgetTab } from "./execute/human-input.ts"
 import { devExtension, PUBLIC_STORE_ID, stateRoot, storeConfig } from "./paths.ts"
 import { ProtectedFrameTracker } from "./cdp/protected-frames.ts"
-import { extensionCapabilityTabRelease, type CdpEvent, type JsonObject } from "./protocol.ts"
+import { extensionCapabilityTabRelease, type CdpEvent, type JsonObject, type JsonValue } from "./protocol.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { relayHostname } from "./relay/config.ts"
 import {
@@ -831,6 +832,29 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     registry,
     recordingRelay,
     sessions,
+    sessionGroup: (input) => Effect.gen(function* () {
+      const request = yield* Schema.decodeUnknownEffect(SessionGroupRequest)(input)
+      const summary = sessions.summary(request.id)
+      if (!summary) throw new Error(`Session not found: ${request.id}`)
+      if (summary.readOnly && (request.title !== undefined || request.collapsed !== undefined)) throw new Error("Read-only sessions cannot change groups")
+      const targets = registry.listRootTargets().filter(t => t.opencodeBrowserSessionId === request.id && t.owner === "relay")
+      const byBrowser = new Map<BrowserLink, number[]>()
+      for (const target of targets) {
+        const mapped = browsers.browserTab(target.tabId)
+        if (!mapped) throw new Error("Session browser is disconnected")
+        if (!mapped.link.rpc.supports("session-groups")) throw new Error("This browser needs the group-controls extension build")
+        const ids = byBrowser.get(mapped.link) ?? []
+        ids.push(mapped.tabId)
+        byBrowser.set(mapped.link, ids)
+      }
+      const groups: JsonValue[] = []
+      for (const [link, tabIds] of byBrowser) {
+        const result = yield* sendToExtension({ method: "session.group", params: { sessionId: request.id, tabIds,
+          ...(request.title === undefined ? {} : { title: request.title }), ...(request.collapsed === undefined ? {} : { collapsed: request.collapsed }) } }, link)
+        if (Array.isArray(result.groups)) groups.push(...result.groups)
+      }
+      return { groups }
+    }),
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),
     revokeBrowser: (key) => handshake.revokeBrowser(key),
     cleanupTabs,

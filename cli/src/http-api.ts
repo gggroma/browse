@@ -46,6 +46,8 @@ export function createHttpRequestHandler(options: {
    * `idleMinutes` applies only to those sessions' tabs, and every other tab also waits for the setting.
    */
   readonly cleanupTabs: (idleMinutes: number | undefined, sessions?: readonly string[]) => Effect.Effect<JsonObject, Error>
+  /** Organizes only the explicitly named session's relay-owned groups. */
+  readonly sessionGroup?: (input: unknown) => Effect.Effect<object, Error>
   /** Reloads the extension so an unpacked install picks up files `install` just replaced. */
   readonly reloadExtension: () => Effect.Effect<JsonObject, Error>
   /** Drops the connection of the browser with this profile key, whose token `pair --revoke` just deleted. */
@@ -199,6 +201,7 @@ export function createHttpRequestHandler(options: {
         pathname,
         sessions: options.sessions,
         registry: options.registry,
+        ...(options.sessionGroup ? { sessionGroup: options.sessionGroup } : {}),
       }))
       return
     }
