@@ -38,10 +38,13 @@ class Node extends FakeEventTarget {
     this.parent = undefined
   }
   contains(node: Node): boolean {
-    return node === this || this.children.some((child) => child.contains(node))
+    return node === this || this.children.some((child) => Node.prototype.contains.call(child, node))
   }
   querySelectorAll(): Element[] {
-    return []
+    return this.children.flatMap((child) => [
+      ...(child instanceof Element ? [child] : []),
+      ...Node.prototype.querySelectorAll.call(child),
+    ])
   }
 }
 
@@ -52,7 +55,10 @@ class Element extends Node {
   title = ""
   disabled = false
   id = ""
-  shadowRoot: ShadowRoot | null = null
+  private attachedShadow: ShadowRoot | null = null
+  get shadowRoot() {
+    return this.attachedShadow
+  }
   popoverOpen = false
   /** Open as a modal dialog (:modal). */
   modal = false
@@ -60,8 +66,11 @@ class Element extends Node {
   rect = { left: 0, top: 0, right: 1280, bottom: 800 }
   shown = 0
   hidden = 0
-  constructor(readonly tagName: string) {
+  constructor(private readonly tag: string) {
     super()
+  }
+  get tagName() {
+    return this.tag
   }
   getAttribute(name: string) {
     return this.attributes.get(name) ?? null
@@ -100,7 +109,7 @@ class Element extends Node {
   }
   attachShadow({ mode }: { mode: string }) {
     const shadow = new ShadowRoot(mode)
-    this.shadowRoot = mode === "open" ? shadow : null
+    this.attachedShadow = mode === "open" ? shadow : null
     shadows.push(shadow)
     return shadow
   }
@@ -143,13 +152,19 @@ class Document extends Node {
 }
 
 class MutationObserver {
-  observe() {}
-  disconnect() {}
+  static active: MutationObserver | undefined
+  constructor(readonly callback: (records: { addedNodes: Node[] }[]) => void) {}
+  observe() {
+    MutationObserver.active = this
+  }
+  disconnect() {
+    if (MutationObserver.active === this) MutationObserver.active = undefined
+  }
 }
 
 const shadows: ShadowRoot[] = []
 const document = new Document()
-Object.assign(globalThis, { document, Element, HTMLElement, HTMLDialogElement, ShadowRoot, Document, MutationObserver, location: new URL("https://bank.example/login") })
+Object.assign(globalThis, { document, Node, Element, HTMLElement, HTMLDialogElement, ShadowRoot, Document, MutationObserver, location: new URL("https://bank.example/login") })
 
 const stub = installChrome()
 const sent: Array<Record<string, unknown>> = []
@@ -195,6 +210,46 @@ beforeEach(() => {
   sent.length = 0
   failSend = false
   now += 1_000
+})
+
+describe("extension-frame scan", () => {
+  test.each([
+    ["id", ["id"]],
+    ["multiple accessors", ["tagName", "getAttribute", "hasAttribute", "querySelectorAll", "contains", "shadowRoot"]],
+  ])(
+    "completes the scan when form controls shadow %s",
+    (_label, names) => {
+      const form = document.createElement("form")
+      const marker = document.createElement("div")
+      marker.setAttribute("id", "bitwarden-regression-marker")
+      for (const name of names) {
+        const input = document.createElement("input")
+        input.setAttribute("name", name)
+        form.append(input)
+        Object.defineProperty(form, name, { value: input })
+      }
+      form.append(marker)
+      document.documentElement.append(form)
+      let response: unknown
+      try {
+        const onMessage = chrome.runtime.onMessage as unknown as StubEvent
+        onMessage.emit({ action: "evict-extension-frames" }, {}, (result: unknown) => { response = result })
+        expect(response).toEqual({ removed: 1 })
+        expect(form.isConnected).toBe(true)
+        expect(marker.isConnected).toBe(false)
+
+        form.remove()
+        tell({ action: "page-status.set", status: { state: "running", owner: "session" } })
+        form.append(marker)
+        document.documentElement.append(form)
+        MutationObserver.active!.callback([{ addedNodes: [form] }])
+        expect(form.isConnected).toBe(true)
+        expect(marker.isConnected).toBe(false)
+      } finally {
+        form.remove()
+      }
+    },
+  )
 })
 
 describe("handoff card", () => {

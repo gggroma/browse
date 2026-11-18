@@ -194,36 +194,44 @@ function raise() {
  */
 function evictForeignFrames(root: Node): number {
   const own = `chrome-extension://${chrome.runtime.id}`
+  // Named form controls can shadow both DOM properties and methods on the form instance.
+  const { getAttribute, hasAttribute, querySelectorAll, remove } = Element.prototype
+  const tagName = Object.getOwnPropertyDescriptor(Element.prototype, "tagName")!.get!
+  const shadowRoot = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")!.get!
+  const { contains } = Node.prototype
   const foreign = (element: Element) => {
-    const tag = element.tagName.toLowerCase()
+    const tag = (tagName.call(element) as string).toLowerCase()
     if (
       tag.startsWith("com-1password-") ||
-      element.hasAttribute("data-onepassword-extension") ||
-      element.hasAttribute("data-lastpass-root") ||
-      element.id.startsWith("bitwarden-")
+      hasAttribute.call(element, "data-onepassword-extension") ||
+      hasAttribute.call(element, "data-lastpass-root") ||
+      getAttribute.call(element, "id")?.startsWith("bitwarden-")
     )
       return true
     if (tag !== "iframe" && tag !== "frame" && tag !== "object" && tag !== "embed") return false
-    const src = element.getAttribute("src") ?? element.getAttribute("data") ?? ""
+    const src = getAttribute.call(element, "src") ?? getAttribute.call(element, "data") ?? ""
     return src.startsWith("chrome-extension://") && !src.startsWith(own)
   }
   let removed = 0
   const visit = (node: Element | Document | ShadowRoot) => {
     if (node instanceof Element && foreign(node)) {
-      node.remove()
+      remove.call(node)
       removed++
       return
     }
-    if (node instanceof Element && node.shadowRoot) visit(node.shadowRoot)
-    for (const element of Array.from(node.querySelectorAll("*"))) {
+    const shadow = node instanceof Element ? shadowRoot.call(node) as ShadowRoot | null : null
+    if (shadow) visit(shadow)
+    const descendants = node instanceof Element ? querySelectorAll.call(node, "*") : node.querySelectorAll("*")
+    for (const element of Array.from(descendants)) {
       // Skip what went with an element removed earlier in this walk.
-      if (!node.contains(element)) continue
+      if (!contains.call(node, element)) continue
       if (foreign(element)) {
-        element.remove()
+        remove.call(element)
         removed++
         continue
       }
-      if (element.shadowRoot) visit(element.shadowRoot)
+      const shadow = shadowRoot.call(element) as ShadowRoot | null
+      if (shadow) visit(shadow)
     }
   }
   if (root instanceof Element || root instanceof Document || root instanceof ShadowRoot) visit(root)
