@@ -18,19 +18,34 @@ export function relayProbeResult(status: number | undefined, body: unknown): Exc
   return "absent"
 }
 
+function requestRelayVersion(port: number, timeoutMs: number, method: "GET" | "HEAD") {
+  return fetch(`http://127.0.0.1:${port}/version`, {
+    method,
+    headers: { "x-browse-install": "probe" },
+    cache: "no-store",
+    credentials: "omit",
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+}
+
+/** An HTTP response confirms reachability. The WebSocket handshake still validates the relay. */
+export async function localRelayReachable(port: number, timeoutMs: number): Promise<boolean> {
+  try {
+    await requestRelayVersion(port, timeoutMs, "HEAD")
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * GETs the relay's open /version on `port` and says what answered. Anything that isn't browse's own reply, or no
  * answer within `timeoutMs`, reads as absent. Sent without credentials: whoever holds the port can't learn anything.
  */
 export async function probeRelayPort(port: number, timeoutMs = 2_000): Promise<Exclude<RelayProbe, "unknown">> {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/version`, {
-      headers: { "x-browse-install": "probe" },
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
-    })
+    const response = await requestRelayVersion(port, timeoutMs, "GET")
     return relayProbeResult(response.status, await response.json().catch(() => undefined))
   } catch {
     return "absent"

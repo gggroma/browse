@@ -3,6 +3,7 @@
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
 import { checkoutReloadPrefix, extensionProtocolVersion, unpackedExtensionId } from "../../cli/src/protocol"
+import { localRelayReachable } from "../agent-relay/probe"
 import {
   defaultRelayPort,
   extensionReconnectAlarmPeriodMs,
@@ -26,7 +27,7 @@ import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay/log"
 import { AgentGroups } from "./agent-relay/groups"
 import { createRelayCommands } from "./agent-relay/commands"
 import { createRelayDebugger } from "./agent-relay/debugger"
-import { createRelayDiscovery, relayTarget } from "./agent-relay/discovery"
+import { createRelayDiscovery, PROBE_TIMEOUT_MS, relayTarget } from "./agent-relay/discovery"
 import { defaultDiscovered, discoveredKeys, discoveredRelay, isDeliberateClose, provenDiscovered, shownRelayPort } from "./agent-relay/discovered"
 import { createRelayGrouping } from "./agent-relay/grouping"
 import { createRelayHandshake } from "./agent-relay/handshake"
@@ -66,6 +67,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const log = createAgentRelayLog()
   let socket: WebSocket | undefined
   let starting: Promise<void> | undefined
+  let localProbe: { restartReason?: string } | undefined
   let generation = 0
   let status: AgentRelayStatus = "offline"
   let host = "127.0.0.1"
@@ -326,6 +328,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     clearTimeout(retry)
     retry = undefined
     if (closeReason !== undefined) socket?.close(1000, closeReason)
+    if (localProbe) {
+      localProbe.restartReason = reason
+      return
+    }
     void connect(reason)
   }
 
@@ -441,6 +447,25 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     // While no relay runs, attempts repeat until one starts; log the first ones of a streak, not every poll.
     const quiet = status === "offline" && attempts > 1
     if (!quiet) log.add("connect", { host, port, attempt: attempts, reason, generation: mine })
+    if (host === "127.0.0.1") {
+      // Chrome records each refused WebSocket as an extension error during normal relay downtime.
+      const probe: { restartReason?: string } = {}
+      localProbe = probe
+      const reachable = await localRelayReachable(port, PROBE_TIMEOUT_MS)
+      localProbe = undefined
+      // A manual reconnect or settings change during the probe needs a fresh target and credential.
+      if (probe.restartReason) return start(probe.restartReason)
+      if (!reachable) {
+        if (!quiet) log.add("relay.unreachable", { port })
+        setStatus(presenceOnly ? "unpaired" : "offline")
+        handshake.settle(mine)
+        const missed = () => {
+          if (!presenceOnly) schedule(quiet, false)
+        }
+        if (!discovery.afterClose({ trusted: false, deliberate: false, code: 1006 }, missed)) missed()
+        return
+      }
+    }
     const current = new WebSocket(url)
     socket = current
     let openedAt: number | undefined

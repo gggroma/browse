@@ -63,6 +63,6 @@ test("the pairing file's port is the first port dialled, and the code may go the
   const sent = FakeWebSocket.made[0]!.sent.map((data) => JSON.parse(data))
   expect(sent.map((message) => message.method)).toEqual(["protocol", "hello"])
   expect(sent[1].params.pairing.mode).toBe("code")
-  // No scan was needed: the hint named the relay.
-  expect(probes).toEqual([])
+  // Only the hinted port was checked.
+  expect(probes).toEqual([`http://127.0.0.1:${BROWSER_PORT}/version`])
 })

@@ -22,7 +22,7 @@ class FakeWebSocket {
   onclose: ((event: unknown) => void) | null = null
   constructor(readonly url: string) {
     FakeWebSocket.made.push(this)
-    // Nothing answers there.
+    // An HTTP listener answers at the pin, but the WebSocket fails.
     setTimeout(() => {
       this.readyState = FakeWebSocket.CLOSED
       this.onclose?.({ code: 1006, reason: "", wasClean: true })
@@ -54,7 +54,10 @@ test("an explicit address never scans for a relay on a fallback port", async () 
   relay.reconnect()
   await until(() => FakeWebSocket.made.length > 1)
   await settle()
-  expect(probes).toEqual([])
+  expect(probes).toEqual([
+    `http://127.0.0.1:${PORT_KEY_PORT}/version`,
+    `http://127.0.0.1:${PORT_KEY_PORT}/version`,
+  ])
   expect((await stub.chrome.storage.local.get("agentRelayDiscoveredPort")).agentRelayDiscoveredPort).toBeUndefined()
   expect(FakeWebSocket.made.every((socket) => socket.url === `ws://127.0.0.1:${PORT_KEY_PORT}/extension`)).toBe(true)
   expect(relay.state().relay).toEqual({ address: `localhost:${PORT_KEY_PORT}`, remote: false })
