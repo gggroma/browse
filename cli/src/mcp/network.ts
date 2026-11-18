@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
+import { filterNetworkExchanges } from "./network-filter.ts"
 import {
   NetworkToolOutput,
   ensureSessionExists,
@@ -64,18 +65,7 @@ registerMcpTools({
             const domains = optionalStringArrayField(object, "domains")
             const result = yield* ctx.relay.networkStop({ sessionId })
             if (!failedOnly && !domains?.length) return { action, session: sessionId, ...result }
-            const hosts = new Set(domains?.map((domain) => domain.toLowerCase()))
-            const matching = result.exchanges.filter((entry) => {
-              if (failedOnly && !entry.failure && (entry.response?.status ?? 0) < 400) return false
-              if (!hosts.size) return true
-              try {
-                return hosts.has(new URL(entry.request.url).hostname.toLowerCase())
-              } catch {
-                return false
-              }
-            })
-            const exchanges = matching.slice(0, 100)
-            return { action, session: sessionId, ...result, exchanges, filteredCount: matching.length, resultsTruncated: matching.length > exchanges.length }
+            return { action, session: sessionId, ...result, ...filterNetworkExchanges(result.exchanges, failedOnly ?? false, domains ?? []) }
           }
           const explicitSession = optionalStringField(object, "session")
           const caller = yield* ctx.caller
