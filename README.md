@@ -1,5 +1,4 @@
-> Maintained fork with local browser controls,
-> branch `dev-group-controls`, checked out at `.`.
+> This fork maintains the `dev-group-controls` branch.
 > Use the [fork build and Chrome update instructions](#fork-build-and-chrome-updates)
 > below for the enhanced version. Upstream install/update commands elsewhere in
 > this README install stock Browse and do not include these group controls.
@@ -394,10 +393,11 @@ as the unpacked "Browse-Agents" extension in the existing Chrome profile. Do not
 store-managed extension files or copy a browser profile. A loaded local build
 is required: the stock extension advertises no `session-groups` capability.
 
-In this setup, `scripts/local-browse.ps1` selects the persistent runtime
-`../.ai-folder/tools/browse-group-controls-runtime` and port 19990.
-Moving the source checkout does not move or reset browser pairing. Both Codex and Vibe should use the
-same built `cli/dist/cli.mjs mcp` with those environment values. This isolates
+By default, `scripts/local-browse.ps1` selects the persistent runtime under
+`.ai-folder/tools/browse-group-controls-runtime` beside the checkout and port 19990.
+Moving the checkout to another parent changes this default. Set
+`OPENCODE_BROWSER_HOME` to the existing runtime path to retain its pairing.
+Both Codex and Vibe should use the same built `cli/dist/cli.mjs mcp` with those environment values. This isolates
 the enhanced installation from the stock relay while an earlier chat finishes.
 Automatic updates to the stock installation do not deploy this local checkout.
 
@@ -425,7 +425,6 @@ Use Node 22.19 or newer and the packageManager-pinned Bun 1.4.4. Run from the
 existing background shell, without launching a new terminal or browser window:
 
 ```powershell
-Set-Location .
 git switch dev-group-controls
 git pull --ff-only origin dev-group-controls
 bun install --frozen-lockfile
@@ -443,7 +442,7 @@ in `scripts/build-local.ts` and the extension version/version_name in
 not reuse a build ID for different implementation code.
 ### Load the extension from this checkout
 
-The unpacked installation directory is `./dist`. The
+The unpacked installation directory is the checkout's `dist` folder. The
 previous AI-folder copy is a legacy installation. Chrome Reload rereads the
 currently registered directory, so use **Load unpacked** for this one-time move.
 
@@ -452,7 +451,7 @@ currently registered directory, so use **Load unpacked** for this one-time move.
    idle before changing the installation.
 2. In the existing Chrome profile, open **Extensions > Manage Extensions**.
    Enable **Developer mode**, click **Load unpacked**, and select
-   `./dist`. Chrome protects this management page from
+   the checkout's `dist` folder. Chrome protects this management page from
    the configured browser automation, so perform the folder selection in Chrome.
 3. Open **Details** for **Browse-Agents**. Verify its extension
    ID is `afeafocngkodbmaipcngoamamfmekgfo` and **Loaded from** points to the
@@ -507,11 +506,11 @@ captured network failures are separate opt-ins. Network `stop` accepts
 `connection_diagnostics` reports connection and optional group failures.
 The shared `browse-agent` skill owns the current usage guidance.
 
-Both clients launch `C:/Program Files/nodejs/node.exe` with arguments
-`./cli/dist/cli.mjs`, `mcp`, and these environment values:
+Both clients launch the installed Node executable with the checkout's
+`cli/dist/cli.mjs` and `mcp` as arguments. Configure these environment values:
 
 ```text
-OPENCODE_BROWSER_HOME=../.ai-folder/tools/browse-group-controls-runtime
+OPENCODE_BROWSER_HOME=<runtime directory beside the checkout>
 OPENCODE_BROWSER_PORT=19990
 ```
 
