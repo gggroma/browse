@@ -396,7 +396,8 @@ is required: the stock extension advertises no `session-groups` capability.
 By default, `scripts/local-browse.ps1` selects the persistent runtime under
 `.ai-folder/tools/browse-group-controls-runtime` beside the checkout and port 19990.
 Moving the checkout to another parent changes this default. Set
-`OPENCODE_BROWSER_HOME` to the existing runtime path to retain its pairing.
+`OPENCODE_BROWSER_HOME` to the existing runtime path to retain its pairing;
+keep that machine-specific value in your local agent configuration, not in Git.
 Both Codex and Vibe should use the same built `cli/dist/cli.mjs mcp` with those environment values. This isolates
 the enhanced installation from the stock relay while an earlier chat finishes.
 Automatic updates to the stock installation do not deploy this local checkout.
@@ -513,6 +514,16 @@ Both clients launch the installed Node executable with the checkout's
 OPENCODE_BROWSER_HOME=<runtime directory beside the checkout>
 OPENCODE_BROWSER_PORT=19990
 ```
+
+From the checkout root, the default runtime path can be calculated in PowerShell
+without embedding a machine-specific path:
+
+```powershell
+$checkout = (Get-Location).Path
+$runtime = Join-Path (Split-Path $checkout -Parent) '.ai-folder/tools/browse-group-controls-runtime'
+```
+If the checkout was moved, use the existing runtime path from local agent
+configuration instead of the newly calculated default so pairing is preserved.
 
 Codex registers this under `[mcp_servers.browse]` in its user config. Mistral Vibe
 uses a stdio `[[mcp_servers]]` entry named `browse`. Preserve other config fields
