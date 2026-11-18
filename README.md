@@ -410,44 +410,47 @@ in `scripts/build-local.ts` and the extension version/version_name in
 not reuse a build ID for different implementation code. The current identity is
 retained because this move changes setup scripts and documentation only.
 
-### Update the extension already loaded in Chrome
+### Load the extension from this checkout
 
-The currently paired extension is loaded from
-`../.ai-folder/tools/browse-group-controls/dist`. That path is an
-installation directory retained for continuity; `.` is now
-the canonical source. Chrome Reload rereads the directory originally loaded,
-so building the new checkout alone does not update that installed extension.
+The unpacked installation directory is `./dist`. The
+previous AI-folder copy is a legacy installation. Chrome Reload rereads the
+currently registered directory, so use **Load unpacked** for this one-time move.
 
-1. Finish browser work and verify no enhanced-runtime sessions or owned tabs
-   remain: `./scripts/local-browse.ps1 status --json`.
-2. Build successfully using the commands above.
-3. Copy the new extension files to the existing installation directory:
+1. Build successfully using the commands above. Check the enhanced relay with
+   `./scripts/local-browse.ps1 status --json` and wait until its browser work is
+   idle before changing the installation.
+2. In the existing Chrome profile, open **Extensions > Manage Extensions**.
+   Enable **Developer mode**, click **Load unpacked**, and select
+   `./dist`. Chrome protects this management page from
+   the configured browser automation, so perform the folder selection in Chrome.
+3. Open **Details** for **browse - local group controls**. Verify its extension
+   ID is `afeafocngkodbmaipcngoamamfmekgfo` and **Loaded from** points to the
+   checkout's `dist`. If Chrome refuses the load because the old copy has the
+   same ID, confirm the old copy's path before removing it and loading the new
+   folder. Removing the old registration can clear extension-local settings and
+   require pairing again. Leave the stock Browse and ChatGPT extensions alone.
+4. Check `./scripts/local-browse.ps1 status --json` for a connected, compatible
+   extension and the expected local build. The same build can run from either
+   folder, so relay status alone cannot verify the move.
 
-   ```powershell
-   Copy-Item -Path ./dist/* -Destination ../.ai-folder/tools/browse-group-controls/dist -Recurse
-   ```
+### Improve and reload the local extension
 
-4. In Chrome, open Extensions > Manage Extensions. Find
-   `browse - local group controls` and click its circular Reload button once.
-   Browser automation cannot access that protected management page; this click
-   belongs to the user. Do not reload the stock extension or reinstall both.
-5. Run `./scripts/local-browse.ps1 status --json`; verify the extension is
-   connected, protocol-compatible, and reports the expected local build.
-6. If relay/client code changed, first ensure its session list is empty, then
-   restart only this isolated runtime with `./scripts/local-browse.ps1 relay restart`.
-   Recheck status and `session_group` before resuming work. Never restart another
-   chat's active relay or the separate stock relay.
+1. Edit and test the source in this checkout. Follow the build identity guidance
+   above when runtime code changes. Rebuild with `bun scripts/build-local.ts`.
+2. Once browser work is idle, click the circular **Reload** button for
+   **browse - local group controls** in **Manage Extensions**. Confirm
+   **Loaded from** is still the checkout's `dist`.
+3. If relay code changed, wait until the isolated relay has no sessions, then
+   restart it with `./scripts/local-browse.ps1 relay restart`. Keep the stock
+   relay and other chats' sessions intact. Check status and verify
+   `session_group` in an owned session before resuming work, then clean it up.
 
-Pairing normally survives Reload. If this build is genuinely unpaired, run
-`bun scripts/prepare-local.ts`, copy only `dist/relay-pairing.json` to the existing
-installation's `dist/`, and Reload that local extension once while the relay is
-running. The code expires after one hour; regenerate it after a delayed handoff.
-After connected status is verified, remove those exact spent pairing files.
-Never commit or print pairing codes, tokens or browser profile data.
-
-For a fresh installation, load `./dist` unpacked instead.
-Do not keep duplicate local copies enabled. The Chrome Web Store does not update
-an unpacked fork; repeat this build/copy/Reload procedure for future changes.
+Pairing normally survives Reload. If the extension is genuinely unpaired, run
+`bun scripts/prepare-local.ts` from the checkout while the isolated relay is
+running. Reload the repo-backed extension within one hour so it can read the
+one-time file in its own `dist`. After verifying it connected, delete that exact
+spent `dist/relay-pairing.json`. Keep pairing codes, tokens and browser profile
+data out of Git and command output.
 
 ### Shared agent setup
 
