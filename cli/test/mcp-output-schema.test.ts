@@ -246,6 +246,11 @@ describe("tool output schemas", () => {
       packageRoot: "/tmp/browse",
     })
     const byName = new Map(buildRegisteredMcpTools(ctx).map((spec) => [spec.name, spec]))
+    const filtered = await Effect.runPromise(byName.get("network")!.handle({
+      session: "mcp-1234abcd", action: "stop", failedOnly: true,
+    }))
+    expect((filtered as { exchanges: unknown[] }).exchanges).toHaveLength(0)
+    expect(Schema.is(byName.get("network")!.outputSchema!)(filtered)).toBe(true)
     const cases: Record<string, ReadonlyArray<{ action: string; [key: string]: unknown }>> = {
       network: [
         { action: "start" },

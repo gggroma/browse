@@ -5,6 +5,8 @@ import {
   NetworkToolOutput,
   ensureSessionExists,
   objectSchema,
+  optionalBooleanField,
+  optionalStringArrayField,
   optionalStringField,
   requiredAction,
   requireObject,
@@ -33,6 +35,8 @@ registerMcpTools({
               "Optional session id. Defaults to your current session; start creates it when missing.",
           },
           urlFilter: { type: "string", description: "For start: capture only request URLs containing this text." },
+          failedOnly: { type: "boolean", description: "For stop: include only failed requests and HTTP errors." },
+          domains: { type: "array", items: { type: "string" }, description: "For stop: include exact request hostnames." },
         },
         ["action"],
       ),
@@ -56,7 +60,22 @@ registerMcpTools({
           }
           if (action === "stop") {
             const sessionId = yield* ctx.resolveSessionId(object)
-            return { action, session: sessionId, ...(yield* ctx.relay.networkStop({ sessionId })) }
+            const failedOnly = optionalBooleanField(object, "failedOnly")
+            const domains = optionalStringArrayField(object, "domains")
+            const result = yield* ctx.relay.networkStop({ sessionId })
+            if (!failedOnly && !domains?.length) return { action, session: sessionId, ...result }
+            const hosts = new Set(domains?.map((domain) => domain.toLowerCase()))
+            const matching = result.exchanges.filter((entry) => {
+              if (failedOnly && !entry.failure && (entry.response?.status ?? 0) < 400) return false
+              if (!hosts.size) return true
+              try {
+                return hosts.has(new URL(entry.request.url).hostname.toLowerCase())
+              } catch {
+                return false
+              }
+            })
+            const exchanges = matching.slice(0, 100)
+            return { action, session: sessionId, ...result, exchanges, filteredCount: matching.length, resultsTruncated: matching.length > exchanges.length }
           }
           const explicitSession = optionalStringField(object, "session")
           const caller = yield* ctx.caller

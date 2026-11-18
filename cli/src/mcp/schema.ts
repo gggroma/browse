@@ -130,6 +130,8 @@ export const NetworkToolOutput = Schema.Struct({
   endsAt: Schema.optionalKey(Schema.String),
   ended: Schema.optionalKey(Schema.String),
   stoppedAt: Schema.optionalKey(Schema.String),
+  filteredCount: Schema.optionalKey(Schema.Number),
+  resultsTruncated: Schema.optionalKey(Schema.Boolean),
   exchanges: Schema.optionalKey(Schema.Array(Schema.Struct({
     id: Schema.String,
     startedDateTime: Schema.String,
