@@ -215,7 +215,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
     if (original.shutdownProtocol !== 2) {
       return yield* Effect.fail(new Error(`This legacy relay does not support safe shutdown protocol 2. Stop it manually once, then run \`${cliCommand("relay restart")}\` to upgrade; no shutdown request was sent.`))
     }
-    if (!Number.isFinite(Date.parse(buildId)) || !original.buildId || !Number.isFinite(Date.parse(original.buildId))) {
+    if (!original.buildId || compareRelayBuilds(original.buildId, buildId) === undefined) {
       return yield* Effect.fail(new Error("Cannot explicitly replace a source or unorderable relay build. Stop it manually, then launch the intended build."))
     }
     if (!options.otherBuild && isNewerBuild(original.buildId, buildId)) {
@@ -319,11 +319,21 @@ function isSameRelayInstance(left: RelayVersion, right: RelayVersion): boolean {
   return left.instanceId !== undefined && left.instanceId === right.instanceId
 }
 
+/** Local fork builds have a monotonic sequence; never compare them with unrelated build identities. */
+export function compareRelayBuilds(left: string, right: string): number | undefined {
+  const a = /^local-session-groups-v(\d+)$/.exec(left)
+  const b = /^local-session-groups-v(\d+)$/.exec(right)
+  if (a || b) {
+    if (!a || !b) return undefined
+    const x = Number(a[1]), y = Number(b[1])
+    return Number.isSafeInteger(x) && Number.isSafeInteger(y) ? Math.sign(x - y) : undefined
+  }
+  const x = Date.parse(left), y = Date.parse(right)
+  return Number.isFinite(x) && Number.isFinite(y) ? Math.sign(x - y) : undefined
+}
+
 function isNewerBuild(current: string, running: string | undefined): boolean {
-  if (!running) return false
-  const currentTime = Date.parse(current)
-  const runningTime = Date.parse(running)
-  return Number.isFinite(currentTime) && Number.isFinite(runningTime) && currentTime > runningTime
+  return running !== undefined && (compareRelayBuilds(current, running) ?? 0) > 0
 }
 
 function isRelayInstanceChanged(error: unknown): boolean {

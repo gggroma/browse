@@ -33,6 +33,7 @@ import {
   listenHttpServer,
   logCloseError,
   sendCdpEvent,
+  stableUnpackedExtensionOrigin,
 } from "./relay/helpers.ts"
 import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay/lifecycle-log.ts"
 import { relayLog } from "./relay/log.ts"
@@ -886,6 +887,32 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return { session: prepared.session, groups: prepared.result.groups }
     }),
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),
+    reloadExtensionSafely: (input) => Effect.gen(function* () {
+      const request = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {}
+      if (typeof request.browser !== "string" || typeof request.build !== "string" || !request.build.trim()) {
+        return yield* Effect.fail(new Error("A browser ID and expected build are required"))
+      }
+      // Reload detaches debugger sessions, including lent user tabs; never disturb them.
+      if (registry.rootTargetCount() || registry.childTargets.size || cdpClients.size || recordingRelay.recordingTabIds().length ||
+          Array.from(presentation.activeHandoffTabs.values()).some(tabs => tabs.size)) {
+        return yield* Effect.fail(new Error("Browser work is active; wait for all targets, recordings, handoffs and clients to finish"))
+      }
+      const link = browsers.byId(request.browser)
+      if (!link?.rpc.connected || !link.local || link.origin !== stableUnpackedExtensionOrigin) {
+        return yield* Effect.fail(new Error("The requested local unpacked browser extension is not connected"))
+      }
+      const key = link.key
+      const generation = link.generation
+      yield* sendToExtension({ method: "runtime.reload" }, link)
+      for (let attempt = 0; attempt < 100; attempt++) {
+        yield* Effect.sleep(200)
+        const current = browsers.byKey(key)
+        if (current?.rpc.connected && current.generation !== generation && current.origin === stableUnpackedExtensionOrigin && current.build === request.build) {
+          return { browser: current.id, build: current.build, reloaded: true }
+        }
+      }
+      return yield* Effect.fail(new Error("Extension did not reconnect with the expected build; inspect status before retrying"))
+    }),
     revokeBrowser: (key) => handshake.revokeBrowser(key),
     cleanupTabs,
     settings: settingsSync.httpSettings,

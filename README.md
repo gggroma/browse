@@ -467,14 +467,26 @@ currently registered directory, so use **Load unpacked** for this one-time move.
 ### Improve and reload the local extension
 
 1. Edit and test the source in this checkout. Follow the build identity guidance
-   above when runtime code changes. Rebuild with `bun scripts/build-local.ts`.
-2. Once browser work is idle, click the circular **Reload** button for
-   **Browse-Agents** in **Manage Extensions**. Confirm
-   **Loaded from** is still the checkout's `dist`.
-3. If relay code changed, wait until the isolated relay has no sessions, then
-   restart it with `./scripts/local-browse.ps1 relay restart`. Keep the stock
-   relay and other chats' sessions intact. Check status and verify
-   `session_group` in an owned session before resuming work, then clean it up.
+   above when runtime code changes.
+2. Before building and activating, check the isolated relay for active browser
+   work. Do not disturb another chat's targets, recordings, handoffs, or raw
+   clients. Keep the stock relay and saved sessions intact. Once idle, rebuild
+   with `bun scripts/build-local.ts`.
+3. If relay code changed, use the supported non-forced
+   `./scripts/local-browse.ps1 relay restart` after the relay is idle. Never
+   force a restart to clear another agent's work. The relay restores saved
+   sessions and pairing.
+4. Run `./scripts/reload-local.ps1`. It waits briefly for a paired extension
+   to reconnect after a relay restart. The authenticated relay drains accepted
+   work, blocks new work, refuses active targets and reloads only the selected
+   local unpacked extension. It verifies a new connection with the exact build
+   in `dist/build.json`. A busy, disconnected, ambiguous, older or mismatched
+   relay is a failure, not proof of activation; inspect status and retry only
+   when its cause is resolved. The build ID must change for each runtime change.
+5. Check status and exercise the owned session/group controls, then clean up.
+   If the initial extension is not installed or is disconnected and cannot
+   reconnect, use the one-time **Load unpacked** steps above. Chrome's Reload
+   remains a manual recovery option if the extension cannot receive commands.
 
 Pairing normally survives Reload. If the extension is genuinely unpaired, run
 `bun scripts/prepare-local.ts` from the checkout while the isolated relay is

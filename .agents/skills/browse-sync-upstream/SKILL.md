@@ -8,8 +8,9 @@ description: Merge new official Browse upstream/dev commits into this fork's dev
 The official source is `upstream/dev` on `anomalyco/browse`. The destination is
 `dev-group-controls` in this checkout. The fork's plain `dev` is its upstream
 mirror. This workflow changes only `dev-group-controls` and creates one local
-merge commit. A separate request is required to push, rebuild the installed
-Chrome artifacts, or restart the paired relay.
+merge commit. A separate request is required to push. After a successful sync,
+build and activate the verified local extension using the README's guarded
+workflow when the relay is idle; preserve other chats' browser work.
 
 ## Fetch and merge
 
@@ -68,6 +69,6 @@ Chrome artifacts, or restart the paired relay.
 4. Remove only task-owned verification artifacts and containers. Commit the
    verified merge on `dev-group-controls`. Confirm the two recorded parents,
    ancestry of the fetched official tip, no pending merge, and a clean
-   worktree. Report the upstream SHA, highlights and authors, tests, merge
-   commit and any remaining verification limits. Leave the installed Chrome
-   build and relay alone.
+   worktree. Build and activate as described in the README when safe, verify
+   the running extension identity and report any activation blocker. Report the
+   upstream SHA, highlights and authors, tests and merge commit.

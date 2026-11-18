@@ -51,6 +51,7 @@ export function createHttpRequestHandler(options: {
   readonly sessionPrepare?: (input: unknown) => Effect.Effect<object, Error>
   /** Reloads the extension so an unpacked install picks up files `install` just replaced. */
   readonly reloadExtension: () => Effect.Effect<JsonObject, Error>
+  readonly reloadExtensionSafely?: (input: unknown) => Effect.Effect<JsonObject, Error>
   /** Drops the connection of the browser with this profile key, whose token `pair --revoke` just deleted. */
   readonly revokeBrowser: (key: string) => boolean
   /** The user's settings (user-settings.ts), read and written through the extension. */
@@ -124,6 +125,13 @@ export function createHttpRequestHandler(options: {
         "Protocol-Version": "1.3",
         webSocketDebuggerUrl: webSocketDebuggerUrl.toString(),
       })
+      return
+    }
+    if (pathname === "/extension/reload-safe" && request.method === "POST" && options.reloadExtensionSafely) {
+      runRequestEffect(response, Effect.gen(function* () {
+        const input = yield* readJsonBody(request)
+        sendJson(response, yield* options.shutdown.maintenance(options.reloadExtensionSafely!(input)))
+      }))
       return
     }
     if (pathname === "/extension/reload" && request.method === "POST") {

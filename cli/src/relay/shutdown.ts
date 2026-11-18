@@ -105,6 +105,30 @@ export class RelayShutdown {
     )
   }
 
+  /** Temporarily block admission while a maintenance action uses an idle relay. */
+  maintenance<A>(action: Effect.Effect<A, Error>): Effect.Effect<A, Error> {
+    const control = this
+    return Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+      if (!control.accepting) return yield* control.busyError()
+      control.state = State.Draining()
+      return yield* Effect.gen(function* () {
+        const busy = control.options.busy()
+        if (busy) return yield* control.busyError(busy)
+        yield* restore(control.drainAndSettle())
+        const remaining = control.options.busy()
+        if (remaining) return yield* control.busyError(remaining)
+        if (control.requests !== 0 || !control.options.quiescent()) return yield* control.busyError("changed")
+        // Finish a started reload even if its caller disconnects, keeping admission closed until verification ends.
+        return yield* action
+      }).pipe(Effect.ensuring(Effect.sync(() => {
+        if (State.$is("Draining")(control.state)) {
+          control.options.resume()
+          control.state = State.Running()
+        }
+      })))
+    }))
+  }
+
   private retain(): () => void {
     this.requests += 1
     this.idle.closeUnsafe()
