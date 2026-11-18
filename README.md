@@ -533,12 +533,12 @@ new chat or supported MCP refresh. Do not restart unrelated chats.
 
 The canonical browser-interactions skill remains in
 `~/.codex/skills/browser-interactions`; Vibe discovers that same
-folder through its `skill_paths`. All browser-capable skills inherit this route:
-Codex uses native ChatGPT Chrome first and this fork as its permitted backup;
-Mistral Vibe uses this fork as its primary and only browser route. Native Codex
-groups use the single U+1F50E icon; Browse groups use C/M. Keep explicit, unique
-lowercase session IDs on every call, verify group state after tab churn, and
-close/delete only owned tabs and sessions immediately after browser work.
+folder through its `skill_paths`. Browse Agents is the primary route for Codex
+and the only browser route for Mistral Vibe. Codex may use signed-in native
+ChatGPT Chrome under the shared skill's emergency rules. Native groups use the
+single U+1F50E icon where supported. Browse groups use C for Codex and M for Vibe.
+Keep explicit, unique lowercase session IDs on every Browse call, verify group
+state after tab churn, and close only owned tabs and sessions after browser work.
 
 Do not publish directly to upstream. Push this development branch to the fork
 only after review and relevant checks; upstream synchronization is a separate
