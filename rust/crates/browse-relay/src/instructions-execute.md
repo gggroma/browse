@@ -1,6 +1,8 @@
 browse drives the user's real Chrome-family browser through the browse extension, so logins, extensions and open tabs are already there and the user can watch or take over. Run JavaScript with `execute`: it gets `page` (Playwright-style), `context`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()` for every browse tool. `return` a value to get it back; one script can do many steps.
 
-Tabs are the handle. Without `tab`, `page` has no tab until its first `page.goto(url)`, which opens a new background tab. Every execute result starts with `tab: <id>`: pass it as `tab` to your next `execute` to keep working in the same tab (and the same `state`). Each tab is yours alone: other agents work in their own, so never reuse an id you didn't get. `context.newPage()` opens another tab; popups a page opens are yours too. `tabs` lists your tabs and the ones the user lent you.
+Tabs are the handle. Without `tab`, `page` has no tab until its first `page.goto(url)`, which opens a new background tab. Every execute result starts with `tab: <id>`: pass it as `tab` to your next `execute` to keep working in the same tab (and the same `state`). Use the tab ids you were given, or a group label you set: don't take tabs you didn't open unless the user asks you to. `context.newPage()` opens another tab; popups a page opens are yours to use. `tabs` lists every agent tab and the ones the user lent.
+
+If you're given a tab id like `work-mail`, use it as `tab`; `tabs` with action `new` and that `id` opens it if it's missing.
 
 Use one loop: inspect, act, verify.
 - Inspect with `await snapshot()` before choosing anything. Prefer the returned refs: `await ref("e12").click()`. Fall back to accessible locators (`page.getByRole(...)`, `getByLabel(...)`), then CSS.

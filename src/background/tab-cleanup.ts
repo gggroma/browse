@@ -10,7 +10,7 @@ import { serialQueue } from "./serial"
 // forgotten; an ungroup the relay starts itself keeps it tracked. `cleanup()` runs every few minutes from an alarm
 // and on demand (relay `tabs.cleanup`).
 
-type Tracked = { touched: number }
+type Tracked = { touched: number; keepOpen?: boolean }
 
 const STORAGE_KEY = "tabCleanup"
 const SESSION_KEY = "tabCleanupSession"
@@ -38,8 +38,22 @@ const guards: ((tabId: number) => boolean)[] = []
 
 export type Closed = { tabId: number; title: string; idleMinutes: number }
 
-export function track(tabId: number) {
-  tracked.set(tabId, { touched: Date.now() })
+export function track(tabId: number, options: { keepOpen?: boolean } = {}) {
+  const entry = tracked.get(tabId)
+  if (entry) {
+    entry.touched = Date.now()
+    if (options.keepOpen !== undefined) entry.keepOpen = options.keepOpen || undefined
+  } else {
+    tracked.set(tabId, { touched: Date.now(), ...(options.keepOpen ? { keepOpen: true } : {}) })
+  }
+  save()
+}
+
+/** Keeps a tab out of idle cleanup (or lets it back in): `tabs new` with `keepOpen`, for a tab the agent already has. */
+export function keepOpen(tabId: number, keep: boolean) {
+  const entry = tracked.get(tabId)
+  if (!entry) return
+  entry.keepOpen = keep || undefined
   save()
 }
 
@@ -206,6 +220,8 @@ export async function cleanup(options: { minutes?: number; own?: { tabIds: reado
     }
     if (tab.active && tab.windowId === focused?.id && focused?.focused) continue
     if (tab.audible || guards.some((check) => check(tabId))) continue
+    // `tabs new` with keepOpen: the tab stays until an agent or the user closes it.
+    if (entry.keepOpen) continue
     const removed = await closeAgentTab(tabId).then(
       () => true,
       () => false,
@@ -315,7 +331,7 @@ async function flushed() {
 }
 
 const CREATING_KEY = "tabCleanupCreating"
-type Creating = { id: string; url: string; after: number; at: number }
+type Creating = { id: string; url: string; after: number; at: number; keepOpen?: boolean }
 let creatingWrites: Promise<unknown> = Promise.resolve()
 
 /**
@@ -323,9 +339,9 @@ let creatingWrites: Promise<unknown> = Promise.resolve()
  * being created (Chrome finishes creating it) never tracks it, and nobody would ever close it: a worker restart left
  * such a tab behind about every other time while agents were busy. `reconcileCreates` finds and closes it.
  */
-export async function beginCreate(url: string): Promise<string> {
+export async function beginCreate(url: string, keepOpen = false): Promise<string> {
   const after = Math.max(0, ...(await chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[])).map((tab) => tab.id ?? 0))
-  const entry: Creating = { id: crypto.randomUUID(), url, after, at: Date.now() }
+  const entry: Creating = { id: crypto.randomUUID(), url, after, at: Date.now(), ...(keepOpen ? { keepOpen: true } : {}) }
   await updateCreating((list) => [...list, entry])
   return entry.id
 }
@@ -349,17 +365,20 @@ export async function reconcileCreates(attached: (tabId: number) => boolean): Pr
   const closed: Closed[] = []
   const taken = new Set<number>()
   for (const entry of pending) {
-    const tab = tabs.find((candidate) =>
-      candidate.id !== undefined &&
-      candidate.id > entry.after &&
-      !taken.has(candidate.id) &&
-      !candidate.active &&
-      candidate.openerTabId === undefined &&
-      [candidate.url, candidate.pendingUrl].includes(entry.url) &&
-      !tracked.has(candidate.id) &&
-      !attached(candidate.id),
+    const tab = tabs.find(
+      (candidate) =>
+        candidate.id !== undefined &&
+        candidate.id > entry.after &&
+        !taken.has(candidate.id) &&
+        !candidate.active &&
+        candidate.openerTabId === undefined &&
+        [candidate.url, candidate.pendingUrl].includes(entry.url) &&
+        !tracked.has(candidate.id) &&
+        !attached(candidate.id),
     )
     if (tab?.id === undefined) continue
+    // A tab opened with keepOpen was made to be kept: never clean it up as an orphan.
+    if (entry.keepOpen) continue
     taken.add(tab.id)
     if (await closeAgentTab(tab.id).then(() => true, () => false)) closed.push({ tabId: tab.id, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
   }
@@ -377,6 +396,8 @@ export async function closeUnattached(attached: (tabId: number) => boolean): Pro
   const closed: Closed[] = []
   for (const tabId of Array.from(tracked.keys())) {
     if (attached(tabId)) continue
+    // A keepOpen tab is kept whatever happened to the worker that opened it.
+    if (tracked.get(tabId)?.keepOpen) continue
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     tracked.delete(tabId)
     if (!tab || tab.pinned) continue

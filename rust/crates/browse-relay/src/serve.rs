@@ -42,34 +42,19 @@ pub struct ServeOptions {
     pub paths: Paths,
     pub version: String,
     pub build_id: String,
-    /// Stop after this long with no tool calls, no live clients and nothing waiting on the user.
-    /// OPENCODE_BROWSER_IDLE_SHUTDOWN_MS (0: never), else `MANAGED_IDLE_SHUTDOWN` for a managed relay.
-    pub idle_shutdown: Option<Duration>,
-    /// Started on demand by a client (OPENCODE_BROWSER_MANAGED_RELAY=1), as `/version` reports.
-    pub managed: bool,
     /// Replaces the `autoUpdate` status the extension's pages show (the binary's update state).
     pub auto_update: Option<AutoUpdateStatus>,
     /// Test-only: the ports an unpinned relay tries.
     pub port_candidates: Option<Vec<u16>>,
 }
 
-/// How long a relay started on demand waits with nothing to do before it exits; the next call starts it again.
-pub const MANAGED_IDLE_SHUTDOWN: Duration = Duration::from_secs(30 * 60);
-
 impl Default for ServeOptions {
     fn default() -> Self {
-        let managed = std::env::var("OPENCODE_BROWSER_MANAGED_RELAY").as_deref() == Ok("1");
-        let idle_shutdown = match std::env::var("OPENCODE_BROWSER_IDLE_SHUTDOWN_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
-            Some(ms) => (ms > 0).then(|| Duration::from_millis(ms)),
-            None => managed.then_some(MANAGED_IDLE_SHUTDOWN),
-        };
         Self {
             port: None,
             paths: Paths::from_env(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             build_id: String::new(),
-            idle_shutdown,
-            managed,
             auto_update: None,
             port_candidates: None,
         }
@@ -110,7 +95,7 @@ impl RelayHandle {
         self.relay.idle(quiet)
     }
 
-    /// Runs until the relay stops (`stop`, POST /shutdown, idle shutdown).
+    /// Runs until the relay stops (`stop`, POST /shutdown).
     pub async fn wait(self) {
         let _ = self.task.await;
     }
@@ -118,15 +103,15 @@ impl RelayHandle {
 
 impl Relay {
     /// Nothing would be interrupted by a restart (an update): no call running, no handoff waiting, and no agent
-    /// activity for `quiet`.
+    /// activity for `quiet`. Connected client processes don't count: an agent's `browse mcp` server stays running for
+    /// as long as the agent does, and its calls are what actually use the browser.
     pub fn idle(&self, quiet: Duration) -> bool {
         let st = self.st();
-        let clients = st.clients.iter().any(|pid| crate::util::process_alive(*pid));
-        !clients && !st.busy() && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
+        !st.busy() && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
     }
 }
 
-/// Runs the relay until it stops (SIGINT, SIGTERM, POST /shutdown, idle shutdown). `tools` are every crate's tools;
+/// Runs the relay until it stops (SIGINT, SIGTERM, POST /shutdown). `tools` are every crate's tools;
 /// the relay's own come from `browse_relay::tools()`.
 pub async fn serve(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::Result<()> {
     serve_until(options, tools, async {
@@ -186,8 +171,6 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
         version: options.version.clone(),
         build_id: options.build_id.clone(),
         auto_update: options.auto_update.clone(),
-        idle_shutdown: options.idle_shutdown,
-        managed: options.managed,
     })?;
     *relay.tools.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = tools;
     let state = RelayState { port: addr.port(), configured_port: configured, pid: std::process::id(), instance_id: relay.instance_id.clone(), started_at: relay.started_at.clone() };
@@ -209,8 +192,6 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
         url = format!("http://127.0.0.1:{}", addr.port()),
         version = relay.version.clone(),
         pid = std::process::id(),
-        managed = relay.managed,
-        idleShutdownMs = relay.idle_shutdown.map(|d| d.as_millis() as u64),
     );
     crate::watchdog::spawn(&relay);
     let task = tokio::spawn(run(relay.clone(), listener));
@@ -253,11 +234,29 @@ async fn run(relay: Arc<Relay>, listener: TcpListener) {
     tokio::time::sleep(Duration::from_millis(100)).await;
     persister.abort();
     housekeeping.abort();
-    relay.persist_now();
-    port::remove_relay_state(&relay.paths, relay.configured_port, &relay.instance_id);
+    if let Some(delay) = test_shutdown_delay() {
+        tokio::time::sleep(delay).await;
+    }
+    relay.persist_final();
     rlog!("relay.shutdown.closed", pid = std::process::id());
+    // Last, so a client that waits for it to go (relay::stop, before uninstall deletes browse's folders) knows every
+    // write is done: relay.json is the relay's "finished with my files" marker while it stops answering.
+    port::remove_relay_state(&relay.paths, relay.configured_port, &relay.instance_id);
     heartbeat.abort();
     relay.finished.store(true, Ordering::SeqCst);
+}
+
+/// Test-only: holds open the window between the listener closing and the shutdown's final registry write, so the
+/// uninstall test sees the writes a client that only waits for /version would miss.
+#[cfg(debug_assertions)]
+fn test_shutdown_delay() -> Option<Duration> {
+    std::env::var("OPENCODE_BROWSER_TEST_SHUTDOWN_DELAY_MS").ok()?.trim().parse::<u64>().ok().filter(|ms| *ms > 0).map(Duration::from_millis)
+}
+
+/// Release builds never delay shutdown for tests.
+#[cfg(not(debug_assertions))]
+fn test_shutdown_delay() -> Option<Duration> {
+    None
 }
 
 async fn persist_loop(relay: Arc<Relay>) {
@@ -318,7 +317,8 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
             "instanceId": relay.instance_id,
             "startedAt": relay.started_at,
             "pid": std::process::id(),
-            "managed": relay.managed,
+            // Every relay stops on POST /shutdown; clients before this field went away check it first.
+            "managed": true,
             "shutdownProtocol": 2,
             "runtime": "rust",
         });
@@ -328,6 +328,11 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
             body["installWaiting"] = true.into();
         }
         return json_response(StatusCode::OK, &body);
+    }
+    // A relay that is stopping for an update must not start new work: answer before the tool would wait on a browser
+    // that is already going away. The client retries this (the request never ran) once a restarted relay answers.
+    if relay.is_stopping() {
+        return json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is restarting; try again in a moment", "code": "relay-restarting" }));
     }
     let mut authorized = header(&request, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim).map(str::to_string);
     // The TypeScript relay's /json/version handed connectOverCDP clients a WebSocket URL with the token in its query.
@@ -344,14 +349,14 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
     let call_key = header(&request, &browse_core::CALL_HEADER.to_ascii_lowercase()).filter(|k| !k.is_empty() && k.len() <= 128).map(str::to_string);
     // The TypeScript client's HTTP client (Effect's) sends trace headers on every request; this build's never does.
     let typescript_client = header(&request, "b3").is_some();
-    let body = if method == hyper::Method::POST {
-        match Limited::new(request.into_body(), MAX_BODY).collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(_) => return json_response(StatusCode::PAYLOAD_TOO_LARGE, &json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" })),
-        }
-    } else {
-        Bytes::new()
+    // Read the body whatever the method: closing a connection with body bytes still unread makes our kernel send a
+    // reset instead of a clean close, and a macOS client then loses the answer it hasn't read yet. Only POST's body is
+    // used; every other method's is drained and dropped, under the same size limit.
+    let sent = match Limited::new(request.into_body(), MAX_BODY).collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return json_response(StatusCode::PAYLOAD_TOO_LARGE, &json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" })),
     };
+    let body = if method == hyper::Method::POST { sent } else { Bytes::new() };
     let parsed = || -> Result<Value, Box<Response<Full<Bytes>>>> {
         if body.is_empty() {
             return Ok(json!({}));
@@ -478,6 +483,37 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
     call_tool_keyed(relay, request, client_pid, None).await
 }
 
+/// Rewrites `tab` (and every entry of `tabs`) from a caller-chosen id like `work-mail` to the relay's numeric id, and
+/// says which chosen id `tab` named. Arguments every tool shares pass through here once.
+fn resolve_tab_arguments(relay: &Arc<Relay>, arguments: &mut Value) -> Result<Option<String>, String> {
+    let Some(map) = arguments.as_object_mut() else { return Ok(None) };
+    let mut chosen = None;
+    if let Some(value) = map.get_mut("tab") {
+        match value {
+            Value::String(name) => {
+                let name = name.trim().to_string();
+                let tab = relay.resolve_chosen_tab(&name).map_err(|error| format!("{error:#}"))?;
+                *value = json!(tab);
+                chosen = Some(name);
+            }
+            Value::Null => {}
+            other if other.as_i64().is_some() => {}
+            other => return Err(format!("tab must be an integer tab id or a chosen id like `work-mail`, not {other}")),
+        }
+    }
+    if let Some(Value::Array(list)) = map.get_mut("tabs") {
+        for value in list.iter_mut() {
+            if let Value::String(name) = value {
+                let tab = relay.resolve_chosen_tab(name.trim()).map_err(|error| format!("{error:#}"))?;
+                *value = json!(tab);
+            } else if !value.is_null() && value.as_i64().is_none() {
+                return Err(format!("tabs must be integer tab ids or chosen ids like `work-mail`, not {value}"));
+            }
+        }
+    }
+    Ok(chosen)
+}
+
 /// [call_tool], with the caller's key for the call (CALL_HEADER) so POST /tools/cancel can stop it.
 pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, client_pid: Option<u32>, key: Option<String>) -> Result<ToolOutput, (StatusCode, String)> {
     let tool = relay.tools.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().find(|t| t.spec().name == request.name).cloned();
@@ -485,7 +521,28 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     relay.note_activity();
     let context = ToolContext { browser: Arc::new(RelayBrowser(relay.clone())), file_roots: relay.file_roots.clone() };
     let id = relay.next_call.fetch_add(1, Ordering::SeqCst);
-    let arguments = if request.arguments.is_null() { json!({}) } else { request.arguments };
+    let mut arguments = if request.arguments.is_null() { json!({}) } else { request.arguments };
+    // `tab` takes a numeric id or a chosen id (`work-mail`); tools below this line see the numeric one.
+    let chosen = match resolve_tab_arguments(relay, &mut arguments) {
+        Ok(chosen) => chosen,
+        Err(message) => return Ok(ToolOutput::error(message)),
+    };
+    if let Some(chosen) = &chosen {
+        let tab = arguments["tab"].as_i64().unwrap_or_default();
+        // A second call on a chosen-id tab gets a clear error instead of interleaving with the one running there.
+        // A capture or recording is background work, not a call, so it doesn't refuse calls by the chosen id.
+        let busy = {
+            let mut st = relay.st();
+            let busy = st.tab_call_busy(tab) || st.chosen_reserved(chosen);
+            if !busy {
+                st.chosen_calls.insert(id, tab);
+            }
+            busy
+        };
+        if busy {
+            return Ok(ToolOutput::error(format!("{chosen} is busy: another call is running in that tab. Wait for it to finish, then try again.")));
+        }
+    }
     let tab = arguments.get("tab").and_then(Value::as_i64);
     let name = request.name.clone();
     let started = Instant::now();
@@ -588,7 +645,7 @@ pub(crate) async fn sweep_clients(relay: &Arc<Relay>) {
     }
 }
 
-/// Keepalive pings, idle tabs, calls whose client exited, and idle shutdown.
+/// Keepalive pings, idle tabs and calls whose client exited.
 async fn housekeeping(relay: Arc<Relay>) {
     let keepalive = std::env::var("OPENCODE_BROWSER_KEEPALIVE_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(20_000);
     let started = Instant::now();
@@ -620,14 +677,7 @@ async fn housekeeping(relay: Arc<Relay>) {
         if let Some(ttl) = relay.idle_tab_ttl.filter(|_| now - last_reap >= Duration::from_secs(60)) {
             last_reap = now;
             // Tabs no call used for the idle TTL: an agent's closes, a lent one goes back to the user.
-            let idle: Vec<(i64, crate::relay::Owner)> = {
-                let st = relay.st();
-                st.tabs
-                    .values()
-                    .filter(|t| !t.closing && !t.focused && t.last_used.elapsed() >= ttl && st.handoff_for_tab(t.id).is_none() && !st.tab_busy(t.id))
-                    .map(|t| (t.id, t.owner))
-                    .collect()
-            };
+            let idle: Vec<(i64, crate::relay::Owner)> = relay.idle_tabs(ttl);
             for (tab, owner) in idle {
                 rlog!("tab.reaped", tabId = tab, owner = owner.name());
                 if owner == crate::relay::Owner::User {
@@ -647,14 +697,6 @@ async fn housekeeping(relay: Arc<Relay>) {
             if let Some(bytes) = crate::util::resident_bytes().filter(|b| *b >= 256 * 1024 * 1024) {
                 let tabs = relay.st().tabs.len();
                 rlog!("relay.memory", rssMb = bytes / (1024 * 1024), tabs = tabs);
-            }
-        }
-        if let Some(idle) = relay.idle_shutdown {
-            let quiet = relay.idle(idle);
-            if quiet {
-                rlog!("relay.idle_shutdown", idleMs = idle.as_millis() as u64);
-                relay.stop();
-                return;
             }
         }
     }

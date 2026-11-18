@@ -5,10 +5,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use browse_core::{Browser, CdpError, TabOptions};
+use browse_core::{Browser, CdpError, TabOptions, ToolContext};
 use futures_util::{SinkExt, StreamExt};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -40,7 +41,7 @@ async fn harness() -> Harness {
 }
 
 async fn harness_at(paths: Paths) -> Harness {
-    let options = ServeOptions { port: Some(0), paths: paths.clone(), version: "0.0.0-test".into(), idle_shutdown: None, ..ServeOptions::default() };
+    let options = ServeOptions { port: Some(0), paths: paths.clone(), version: "0.0.0-test".into(), ..ServeOptions::default() };
     let handle = start(options, crate::tools()).await.unwrap();
     Harness { handle, paths }
 }
@@ -94,7 +95,7 @@ async fn pair_with_token(port: u16, paths: &Paths, profile: &str) -> Socket {
     let nonce = b64url(&random_bytes::<32>());
     send(&mut socket, hello(profile, "token", &nonce, None)).await;
     let challenge = next(&mut socket).await;
-    assert_eq!(challenge["method"], "auth.challenge");
+    assert_eq!(challenge["method"], "auth.challenge", "{challenge}");
     let relay_nonce = challenge["params"]["nonce"].as_str().unwrap().to_string();
     assert_eq!(challenge["params"]["proof"], pairing::pairing_proof(&token, "relay", port, &relay_nonce, &nonce));
     assert_eq!(challenge["params"]["protocol"], json!({ "version": 3, "min": 3 }));
@@ -158,7 +159,11 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
             let result = match command["method"].as_str().unwrap_or("") {
                 "tabs.create" => {
                     let created = record.0.lock().unwrap().iter().filter(|c| c["method"] == "tabs.create").count() as i64;
-                    json!({ "tabId": next_tab + created - 1 })
+                    let tab = next_tab + created - 1;
+                    json!({ "tabId": tab })
+                }
+                "debugger.attach" => {
+                    json!({})
                 }
                 "settings.get" | "settings.set" => json!({ "settings": { "window": "current", "grouping": "shared", "idleMinutes": 10, "humanInput": "on", "handoffNotifications": "recording" } }),
                 "debugger.sendCommand" => match params["method"].as_str().unwrap_or("") {
@@ -300,6 +305,10 @@ async fn refuses_a_wrong_token() {
     let closed = next(&mut socket).await;
     assert_eq!(closed["close"], 4006);
     assert_eq!(h.handle.relay.st().handshake.pairing_failures, 1);
+    // A refusal outranks the fresh relay's pairing: it is not reported as a reconnect.
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "refused");
+    assert_eq!(status["reconnecting"], false);
 }
 
 #[tokio::test]
@@ -370,7 +379,7 @@ async fn reclaims_tabs_and_releases_orphans_after_reconnect() {
     let h = harness().await;
     let port = h.handle.port();
     let relay = h.handle.relay.clone();
-    let held = crate::registry::PersistedTab { tab: 21, target_id: "T21".into(), browser_key: "profile-d".into(), opener: None, options: grouped("keeper"), created_at: String::new() };
+    let held = crate::registry::PersistedTab { tab: 21, target_id: "T21".into(), browser_key: "profile-d".into(), opener: None, options: grouped("keeper"), created_at: String::new(), chosen: None, lent: false };
     relay.st().restorable.insert("T21".into(), held);
     let socket = pair_with_token(port, &h.paths, "profile-d").await;
     let (seen, events) = fake_extension(socket, 30);
@@ -489,6 +498,22 @@ async fn background_work_keeps_a_tab_busy() {
     assert!(relay.idle(Duration::ZERO));
 }
 
+/// An agent's `browse mcp` server lives as long as the agent, so connected clients can't hold an update back: only
+/// calls, handoffs and recent activity do.
+#[tokio::test]
+async fn a_quiet_connected_client_does_not_keep_the_relay_from_going_idle() {
+    let (h, _seen, _events) = connected("profile-quiet-client", 240).await;
+    let relay = h.handle.relay.clone();
+    let task = tokio::spawn(async { std::future::pending::<()>().await });
+    relay.call_started(1, task.abort_handle(), Some(std::process::id()), None);
+    relay.st().last_activity = std::time::Instant::now() - Duration::from_secs(60);
+    assert!(!relay.idle(Duration::ZERO), "a running call still holds the relay");
+    relay.call_finished(1);
+    assert!(relay.st().clients.contains(&std::process::id()), "the client that called is still alive");
+    assert!(relay.idle(Duration::ZERO), "a quiet connected client doesn't hold an update back");
+    task.abort();
+}
+
 async fn connected(profile: &str, next_tab: i64) -> (Harness, Arc<Seen>, mpsc::UnboundedSender<Value>) {
     connected_with_urls(profile, next_tab, TargetUrls::default()).await
 }
@@ -507,7 +532,7 @@ fn text(output: &Value) -> Value {
     serde_json::from_str(output["content"][0]["text"].as_str().unwrap_or("null")).unwrap_or(Value::Null)
 }
 
-/// Two agents working at once each open their own tab and only ever touch it: no current tab to fight over.
+/// Two agents working at once each open their own tab and only touch the ids they got: no current tab to fight over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_in_parallel_never_touch_each_others_tabs() {
     let (h, seen, _events) = connected("profile-race", 40).await;
@@ -570,8 +595,6 @@ fn retaking_the_state_lock_panics_instead_of_deadlocking() {
         version: "0".into(),
         build_id: String::new(),
         auto_update: None,
-        idle_shutdown: None,
-        managed: false,
     })
     .unwrap();
     let held = relay.st();
@@ -592,8 +615,6 @@ fn the_state_lock_can_be_taken_again_once_released() {
         version: "0".into(),
         build_id: String::new(),
         auto_update: None,
-        idle_shutdown: None,
-        managed: false,
     };
     let one = crate::relay::Relay::new(config(paths.clone())).unwrap();
     let two = crate::relay::Relay::new(config(paths.clone())).unwrap();
@@ -620,8 +641,6 @@ fn an_address_never_replaces_a_known_browser_name() {
         version: "0".into(),
         build_id: String::new(),
         auto_update: None,
-        idle_shutdown: None,
-        managed: false,
     })
     .unwrap();
     let mut st = relay.st();
@@ -639,7 +658,9 @@ async fn tells_a_typescript_client_to_restart() {
     let token = h.handle.token().to_string();
     for (method, path) in [("GET", "/cli/sessions"), ("POST", "/v1/sessions/ensure"), ("POST", "/cli/execute"), ("GET", "/json/version"), ("GET", "/json/list"), ("POST", "/network/start"), ("GET", "/recording/status"), ("POST", "/tabs/cleanup"), ("GET", "/settings")] {
         assert_eq!(http(port, method, path, None, None).await.0, 401, "{path} still needs the token");
-        let (status, body) = http(port, method, path, Some(&token), Some(json!({}))).await;
+        // Only the POSTs carry a body, as their client did: a GET body has no meaning here.
+        let sent = (method == "POST").then(|| json!({}));
+        let (status, body) = http(port, method, path, Some(&token), sent).await;
         assert_eq!(status, 410, "{path}");
         assert_eq!(body, json!({ "error": crate::serve::LEGACY_CLIENT }), "{path}: an envelope the old client shows as is");
     }
@@ -666,14 +687,61 @@ async fn tells_a_typescript_client_to_restart() {
     }
 }
 
+/// A GET can announce a body, though HTTP gives it no meaning. The relay reads it before it answers: closing with
+/// body bytes still unread makes the kernel send a reset instead of a clean close, and a macOS client then loses the
+/// answer it hasn't read yet.
 #[tokio::test]
-async fn version_reports_a_managed_relay() {
+async fn reads_a_body_announced_on_a_get() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!(
+        "GET /cli/sessions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n",
+        h.handle.token()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut first = [0u8; 64];
+    assert!(tokio::time::timeout(Duration::from_millis(250), stream.read(&mut first)).await.is_err(), "the relay answered before the body it was promised");
+    stream.write_all(b"{}").await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(raw.starts_with("HTTP/1.1 410"), "{raw}");
+}
+
+#[tokio::test]
+async fn version_reports_every_relay_as_managed() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-test-{}", crate::util::random_hex(6))));
-    let options = ServeOptions { port: Some(0), paths: paths.clone(), managed: true, idle_shutdown: None, ..ServeOptions::default() };
+    let options = ServeOptions { port: Some(0), paths: paths.clone(), ..ServeOptions::default() };
     let handle = start(options, crate::tools()).await.unwrap();
     let (_, version) = http(handle.port(), "GET", "/version", None, None).await;
     assert_eq!(version["managed"], true);
     handle.stop();
+    let _ = std::fs::remove_dir_all(&paths.data);
+}
+
+/// The shutdown's final registry write closes the file for good: a persist still queued behind it (a blocking task
+/// outliving the aborted persister) must not recreate the registry after relay.json goes.
+#[test]
+fn a_persist_queued_after_the_final_one_does_nothing() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-final-persist-{}", crate::util::random_hex(6))));
+    let relay = crate::relay::Relay::new(crate::relay::RelayConfig {
+        paths: paths.clone(),
+        configured_port: 0,
+        port: 0,
+        host: "127.0.0.1".into(),
+        version: "0".into(),
+        build_id: String::new(),
+        auto_update: None,
+    })
+    .unwrap();
+    relay.persist_now();
+    assert!(paths.tab_registry(0).is_file(), "a normal persist writes");
+    relay.persist_final();
+    std::fs::remove_file(paths.tab_registry(0)).unwrap();
+    relay.persist_now();
+    relay.persist_final();
+    assert!(!paths.tab_registry(0).exists(), "a persist queued after the final one must not recreate the registry");
     let _ = std::fs::remove_dir_all(&paths.data);
 }
 
@@ -756,6 +824,8 @@ async fn popups_inherit_their_openers_options() {
     assert_eq!(popup.options.group.as_deref(), Some("shop"));
     assert_eq!(popup.options.allowed_origins, Some(vec!["example.com".to_string()]));
     assert!(popup.options.read_only);
+    assert!(browser.read_only(opener).await);
+    assert!(browser.read_only(popup.tab).await);
     let blocked = browser.cdp(95).await.unwrap().send("Input.dispatchKeyEvent", json!({}), None).await.unwrap_err();
     assert!(blocked.to_string().contains("read-only"), "{blocked}");
     // A lent tab's popups don't count while no agent works in it.
@@ -1043,7 +1113,58 @@ async fn tool_arguments_are_checked() {
 async fn opening_a_tab_waits_for_a_browser_without_deadlocking() {
     let h = harness().await;
     // No browser connected yet: this once took the state lock twice in one expression.
+    let started = std::time::Instant::now();
     assert!(h.handle.relay.link_for(None).await.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5), "a browser that was never paired fails fast");
+}
+
+#[tokio::test]
+async fn a_paired_browser_reconnecting_after_a_relay_restart_is_waited_for() {
+    // The harness relay is as fresh as a restarted one, and the token file is what a restarted relay finds on disk.
+    let h = harness().await;
+    pairing::issue_browser_token(&h.paths, "profile-restart-wait", None, None).unwrap();
+    let relay = h.handle.relay.clone();
+    let call = tokio::spawn(async move { relay.link_for(None).await.map(|link| link.id.clone()) });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!call.is_finished(), "the call waits for the reconnect instead of failing after 1.5 s");
+    let socket = pair_with_token(h.handle.port(), &h.paths, "profile-restart-wait").await;
+    let (_seen, events) = fake_extension(socket, 200);
+    events.send(json!({ "method": "ready" })).unwrap();
+    let id = tokio::time::timeout(Duration::from_secs(10), call).await.unwrap().unwrap().unwrap();
+    assert_eq!(id, "test-chrome");
+}
+
+#[tokio::test]
+async fn a_fresh_relay_says_a_paired_browser_is_reconnecting() {
+    let h = harness().await;
+    // No browser ever connected: a fresh relay that finds a pairing on disk is the reconnecting case.
+    pairing::issue_browser_token(&h.paths, "profile-restart-status", None, None).unwrap();
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "paired-offline");
+    assert_eq!(status["reconnecting"], true);
+    let next = status["nextStep"].as_str().unwrap();
+    assert!(next.contains("reconnecting") && next.contains("try again in a few seconds"), "{next}");
+    assert!(!next.contains("open it") && !next.contains("check") && !next.contains("restart"), "{next}");
+}
+
+#[tokio::test]
+async fn after_the_cold_start_window_a_paired_offline_browser_says_to_open_it() {
+    let h = harness().await;
+    pairing::issue_browser_token(&h.paths, "profile-restart-old", None, None).unwrap();
+    // Age the relay past the cold-start window instead of sleeping through it.
+    h.handle.relay.set_age_for_test(Duration::from_secs(36));
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "paired-offline");
+    assert_eq!(status["reconnecting"], false);
+    let next = status["nextStep"].as_str().unwrap();
+    assert!(next.contains("open it") && next.contains("check"), "{next}");
+    let started = std::time::Instant::now();
+    let error = match h.handle.relay.link_for(None).await {
+        Ok(_) => panic!("no browser was there to open a tab in"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("open it") && error.contains("check"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(5), "an expired cold start keeps the fast paired-offline failure");
 }
 
 #[tokio::test]
@@ -1213,10 +1334,18 @@ async fn close_takes_idle_tabs_and_whole_groups() {
     let browser = h.handle.browser();
     let tidy = browser.open_tab(None, &grouped("tidy")).await.unwrap().tab;
     let started = std::time::Instant::now();
-    let (_, cleaned) = http(port, "POST", "/tools/call", Some(&token), Some(json!({ "name": "tabs", "arguments": { "action": "close", "idleMinutes": 0 } }))).await;
+    let (_, cleaned) =
+        http(port, "POST", "/tools/call", Some(&token), Some(json!({ "name": "tabs", "arguments": { "action": "close", "group": "tidy", "idleMinutes": 0 } }))).await;
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(text(&cleaned)["closed"], json!([tidy]), "{cleaned}");
     assert!(seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == tidy));
+    // idleMinutes alone picks no tabs: closing needs explicit ids or a group.
+    let (_, refused) = http(port, "POST", "/tools/call", Some(&token), Some(json!({ "name": "tabs", "arguments": { "action": "close", "idleMinutes": 0 } }))).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(
+        refused["content"][0]["text"].as_str().is_some_and(|t| t.contains("Say which tabs to close")),
+        "{refused}"
+    );
     // Tabs used just now aren't idle for a minute.
     let fresh = browser.open_tab(None, &grouped("tidy")).await.unwrap().tab;
     let (_, kept) = http(port, "POST", "/tools/call", Some(&token), Some(json!({ "name": "tabs", "arguments": { "action": "close", "group": "tidy", "idleMinutes": 1 } }))).await;
@@ -1243,7 +1372,7 @@ async fn closing_a_tab_yourself_warns_nothing() {
 async fn a_call_naming_a_tab_waits_for_the_reconnecting_browser() {
     let h = harness().await;
     let relay = h.handle.relay.clone();
-    let held = crate::registry::PersistedTab { tab: 41, target_id: "T41".into(), browser_key: "profile-restart".into(), opener: None, options: TabOptions::default(), created_at: String::new() };
+    let held = crate::registry::PersistedTab { tab: 41, target_id: "T41".into(), browser_key: "profile-restart".into(), opener: None, options: TabOptions::default(), created_at: String::new(), chosen: None, lent: false };
     relay.st().restorable.insert("T41".into(), held);
     let browser = h.handle.browser();
     let call = {
@@ -1256,4 +1385,283 @@ async fn a_call_naming_a_tab_waits_for_the_reconnecting_browser() {
     events.send(json!({ "method": "debugger.attached", "params": { "tabId": 41, "agent": true } })).unwrap();
     events.send(json!({ "method": "ready" })).unwrap();
     tokio::time::timeout(Duration::from_secs(10), call).await.unwrap().unwrap().expect("the tab came back with the inventory");
+}
+
+async fn tool(relay: &Arc<crate::relay::Relay>, name: &str, arguments: Value) -> browse_core::ToolOutput {
+    crate::serve::call_tool(relay, browse_core::ToolCallRequest { name: name.into(), arguments }, None).await.unwrap()
+}
+
+fn tool_text(output: &browse_core::ToolOutput) -> String {
+    output.content.iter().filter_map(|c| if let browse_core::Content::Text { text } = c { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" ")
+}
+
+#[tokio::test]
+async fn a_chosen_id_is_get_or_create_and_listed_with_the_callers_id() {
+    let (h, seen, _events) = connected("profile-chosen", 300).await;
+    let relay = h.handle.relay.clone();
+    let first = tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await;
+    assert!(!first.is_error, "{}", tool_text(&first));
+    let first = text(&serde_json::to_value(&first).unwrap());
+    let tab = first["tab"].as_i64().unwrap();
+    assert_eq!(first["id"], "work-mail");
+    assert!(seen.commands("tabs.create")[0]["params"].get("id").is_none(), "the id is the relay's to keep");
+    assert!(seen.cdp("Page.navigate").is_empty());
+
+    // The same id again: the tab it already names, and no navigation.
+    let again = tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail", "url": "https://evil.test/" })).await;
+    let again = text(&serde_json::to_value(&again).unwrap());
+    assert_eq!(again["tab"], tab);
+    assert_eq!(again["existed"], true);
+    assert_eq!(seen.commands("tabs.create").len(), 1, "no second tab for one id");
+    assert!(seen.cdp("Page.navigate").is_empty(), "an existing tab is returned without navigating it");
+
+    let listed = text(&serde_json::to_value(tool(&relay, "tabs", json!({})).await).unwrap());
+    let entry = &listed["tabs"][0];
+    assert_eq!(entry["tab"], tab);
+    assert_eq!(entry["id"], "work-mail");
+    assert_eq!(entry["lent"], false);
+    assert_eq!(entry["busy"], false);
+    assert_eq!(entry["browser"], "test-chrome");
+    assert!(entry["lastUsed"].as_str().is_some_and(|time| time.ends_with('Z')), "{entry}");
+
+    // A chosen id is a lowercase slug, never something that reads as a number.
+    for bad in ["Work-mail", "123", "-mail", "work mail"] {
+        let output = tool(&relay, "tabs", json!({ "action": "new", "id": bad })).await;
+        assert!(output.is_error && tool_text(&output).contains("lowercase slug"), "{bad}: {}", tool_text(&output));
+    }
+    assert_eq!(seen.commands("tabs.create").len(), 1, "a refused id opens nothing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chosen_id_survives_a_relay_restart() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-stable-{}", crate::util::random_hex(6))));
+    let first = harness_at(paths.clone()).await;
+    let socket = pair_with_token(first.handle.port(), &paths, "profile-stable").await;
+    let (_seen, events) = fake_extension(socket, 300);
+    events.send(json!({ "method": "ready" })).unwrap();
+    let relay = first.handle.relay.clone();
+    eventually("the browser", || relay.st().connected()).await;
+    let named = tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await;
+    let named = text(&serde_json::to_value(&named).unwrap())["tab"].as_i64().unwrap();
+    let plain = first.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    assert_ne!(named, plain);
+    relay.persist_now();
+    first.handle.stop();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::mem::forget(first);
+
+    // The relay starts again. Its registry comes back from disk and the browser announces the same tabs by their
+    // Chrome ids, so both the relay ids and the chosen id agents know them by come back.
+    let second = harness_at(paths.clone()).await;
+    let socket = pair_with_token(second.handle.port(), &paths, "profile-stable").await;
+    let (_seen, events) = fake_extension(socket, 300);
+    events.send(json!({ "method": "debugger.attached", "params": { "tabId": named, "agent": true } })).unwrap();
+    events.send(json!({ "method": "debugger.attached", "params": { "tabId": plain, "agent": true } })).unwrap();
+    events.send(json!({ "method": "ready" })).unwrap();
+    let relay = second.handle.relay.clone();
+    eventually("the restored tabs", || relay.st().tabs.contains_key(&named) && relay.st().tabs.contains_key(&plain)).await;
+    let listed = text(&serde_json::to_value(tool(&relay, "tabs", json!({})).await).unwrap());
+    let entry = listed["tabs"].as_array().unwrap().iter().find(|t| t["tab"] == named).unwrap();
+    assert_eq!(entry["id"], "work-mail", "the chosen id comes back with the tab");
+    assert_eq!(entry["url"], "about:blank");
+}
+
+#[tokio::test]
+async fn a_lent_tab_survives_a_relay_restart() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-lent-stable-{}", crate::util::random_hex(6))));
+    let first = harness_at(paths.clone()).await;
+    let socket = pair_with_token(first.handle.port(), &paths, "profile-lent-stable").await;
+    let (_seen, events) = fake_extension(socket, 700);
+    events.send(json!({ "method": "ready" })).unwrap();
+    events.send(json!({ "method": "toolbar.clicked", "params": { "tabId": 700 } })).unwrap();
+    let relay = first.handle.relay.clone();
+    eventually("the lent tab", || relay.st().tabs.contains_key(&700)).await;
+    relay.persist_now();
+    first.handle.stop();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::mem::forget(first);
+
+    let second = harness_at(paths.clone()).await;
+    let socket = pair_with_token(second.handle.port(), &paths, "profile-lent-stable").await;
+    let (_seen, events) = fake_extension(socket, 700);
+    events.send(json!({ "method": "debugger.attached", "params": { "tabId": 700 } })).unwrap();
+    events.send(json!({ "method": "ready" })).unwrap();
+    let relay = second.handle.relay.clone();
+    eventually("the lent tab to come back", || relay.st().tabs.contains_key(&700)).await;
+    let listed = second.handle.browser().tabs().await.unwrap();
+    let entry = listed.iter().find(|t| t.tab == 700).unwrap();
+    assert!(entry.lent);
+    assert_eq!(entry.chosen, None);
+}
+
+#[tokio::test]
+async fn a_chosen_tab_closes_when_idle_like_any_other() {
+    let (h, _seen, _events) = connected("profile-chosen-idle", 400).await;
+    let relay = h.handle.relay.clone();
+    let named = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await).unwrap())["tab"].as_i64().unwrap();
+    let plain = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    {
+        let mut st = relay.st();
+        for tab in [named, plain] {
+            let entry = st.tabs.get_mut(&tab).unwrap();
+            entry.last_used = std::time::Instant::now() - Duration::from_secs(3_600);
+        }
+    }
+    let idle = relay.idle_tabs(Duration::from_secs(60));
+    assert!(idle.iter().any(|(tab, _)| *tab == named), "a chosen id closes when idle: {idle:?}");
+    assert!(idle.iter().any(|(tab, _)| *tab == plain), "other idle tabs still close: {idle:?}");
+    let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "work-mail", "idleMinutes": 0 })).await).unwrap());
+    assert_eq!(closed["closed"], json!([named]), "{closed}");
+    assert!(!relay.st().tabs.contains_key(&named));
+}
+
+#[tokio::test]
+async fn keep_open_tabs_survive_idle_cleanup() {
+    let (h, seen, _events) = connected("profile-keep-open", 405).await;
+    let relay = h.handle.relay.clone();
+    let kept = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": true })).await).unwrap())["tab"].as_i64().unwrap();
+    let normal = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    assert!(seen.commands("tabs.create")[0]["params"]["keepOpen"].as_bool().unwrap(), "the extension is told, so its own cleanup keeps it");
+    let listed = text(&serde_json::to_value(tool(&relay, "tabs", json!({})).await).unwrap());
+    let entry = listed["tabs"].as_array().unwrap().iter().find(|t| t["tab"] == kept).unwrap();
+    assert_eq!(entry["keepOpen"], true, "tabs list shows the option: {entry}");
+    {
+        let mut st = relay.st();
+        for tab in [kept, normal] {
+            let entry = st.tabs.get_mut(&tab).unwrap();
+            entry.last_used = std::time::Instant::now() - Duration::from_secs(3_600);
+        }
+    }
+    let idle = relay.idle_tabs(Duration::from_secs(60));
+    assert!(!idle.iter().any(|(tab, _)| *tab == kept), "a keepOpen tab stays: {idle:?}");
+    assert!(idle.iter().any(|(tab, _)| *tab == normal), "a normal tab still closes: {idle:?}");
+    let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "keep-me", "idleMinutes": 0 })).await).unwrap());
+    assert_eq!(closed["closed"], json!([]), "{closed}");
+
+    // Asking again with a different keepOpen updates the stored option and says so.
+    let updated = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": false })).await).unwrap());
+    assert_eq!(updated["existed"], true);
+    assert!(updated["note"].as_str().unwrap().contains("keepOpen is now off"), "{updated}");
+    let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "keep-me", "idleMinutes": 0 })).await).unwrap());
+    assert_eq!(closed["closed"], json!([kept]), "with keepOpen off, idle cleanup closes it again: {closed}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_call_on_a_chosen_tab_says_it_is_busy() {
+    let (h, _seen, _events) = connected("profile-chosen-busy", 410).await;
+    let relay = h.handle.relay.clone();
+    let tab = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await).unwrap())["tab"].as_i64().unwrap();
+    let waiting = {
+        let relay = relay.clone();
+        tokio::spawn(async move { tool(&relay, "handoff", json!({ "message": "wait", "tab": "work-mail", "timeoutSeconds": 30 })).await })
+    };
+    eventually("the handoff", || relay.st().handoffs.contains_key(&tab)).await;
+    let second = tool(&relay, "tabs", json!({ "action": "close", "tab": "work-mail" })).await;
+    assert!(second.is_error, "{}", tool_text(&second));
+    assert!(tool_text(&second).contains("work-mail is busy"), "{}", tool_text(&second));
+    assert!(relay.st().tabs.contains_key(&tab), "the busy call changed nothing");
+    relay.finish_handoff(tab, "continued");
+    tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap();
+    eventually("the tab to go idle", || !relay.st().tab_busy(tab)).await;
+    let after = tool(&relay, "tabs", json!({ "action": "close", "tab": "work-mail" })).await;
+    assert!(!after.is_error, "{}", tool_text(&after));
+}
+
+/// A capture or recording in a chosen-id tab is background work: a call by that id still goes through.
+#[tokio::test]
+async fn background_work_does_not_make_a_chosen_tab_refuse_calls() {
+    let (h, _seen, _events) = connected("profile-chosen-background", 415).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let tab = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await).unwrap())["tab"].as_i64().unwrap();
+    browser.set_busy(tab, "network", true);
+    assert!(relay.st().tab_busy(tab), "the tab is busy with the capture");
+    let closed = tool(&relay, "tabs", json!({ "action": "close", "tab": "work-mail" })).await;
+    assert!(!closed.is_error, "{}", tool_text(&closed));
+    assert_eq!(text(&serde_json::to_value(&closed).unwrap())["closed"], json!([tab]));
+    assert!(!relay.st().tabs.contains_key(&tab), "the call ran instead of being refused");
+}
+
+#[tokio::test]
+async fn closing_a_chosen_tab_frees_its_id() {
+    let (h, seen, _events) = connected("profile-chosen-close", 420).await;
+    let relay = h.handle.relay.clone();
+    let first = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await).unwrap())["tab"].as_i64().unwrap();
+    let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "work-mail" })).await).unwrap());
+    assert_eq!(closed["closed"], json!([first]), "{closed}");
+    assert!(!relay.st().tabs.contains_key(&first));
+    let reopened = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await).unwrap());
+    assert_ne!(reopened["tab"], first, "the id is freed and opens a new tab");
+    assert_eq!(reopened["id"], "work-mail");
+    assert_eq!(seen.commands("tabs.create").len(), 2);
+}
+
+#[tokio::test]
+async fn a_chosen_id_whose_browser_is_disconnected_says_so() {
+    let (h, seen, _events) = connected("profile-chosen-away", 430).await;
+    let relay = h.handle.relay.clone();
+    let tab = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await).unwrap())["tab"].as_i64().unwrap();
+    let link = relay.st().links[0].clone();
+    relay.link_closed(&link, "test");
+    eventually("the tab to be remembered", || !relay.st().tabs.contains_key(&tab) && relay.st().away_tab_by_chosen("work-mail") == Some(tab)).await;
+    let again = tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail", "url": "https://example.com/" })).await;
+    assert!(again.is_error, "{}", tool_text(&again));
+    assert!(tool_text(&again).contains("isn't connected"), "{}", tool_text(&again));
+    assert_eq!(seen.commands("tabs.create").len(), 1, "no duplicate tab behind the disconnected one");
+}
+
+/// A read-only tab stays read-only while it isn't attached: a reconnecting browser keeps its options, so an input
+/// tool refuses the tab before the browser comes back (and a page tool can't run its JavaScript).
+#[tokio::test]
+async fn a_read_only_tab_away_from_its_browser_still_refuses_input() {
+    let (h, _seen, _events) = connected("profile-read-only-away", 90).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let options = TabOptions { read_only: true, ..TabOptions::default() };
+    let tab = browser.open_tab(None, &options).await.unwrap().tab;
+    let link = relay.st().links[0].clone();
+    relay.link_closed(&link, "test");
+    eventually("the tab to be remembered", || !relay.st().tabs.contains_key(&tab) && relay.st().reconnect_owners.values().any(|known| known.tab == tab)).await;
+    assert!(browser.read_only(tab).await, "a reconnecting tab keeps its read-only options");
+
+    let select = browse_page::tools().into_iter().find(|tool| tool.spec().name == "select").unwrap();
+    let ctx = ToolContext { browser: Arc::new(browser), file_roots: Vec::new() };
+    let output = select.call(ctx, json!({ "tab": tab, "selector": "#plan", "values": ["pro"] })).await.unwrap();
+    let refused = tool_text(&output);
+    assert!(output.is_error && refused.contains("browse blocked select") && refused.contains("read-only"), "{refused}");
+
+    // A tab held across a relay restart keeps its options too, before its browser reconnects.
+    let held = crate::registry::PersistedTab { tab: 91, target_id: "T91".into(), browser_key: "profile-held".into(), opener: None, options, created_at: String::new(), chosen: None, lent: false };
+    relay.st().restorable.insert("T91".into(), held);
+    assert!(h.handle.browser().read_only(91).await, "a held tab keeps its read-only options");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chosen_ids_are_unique_across_two_browsers_and_new_takes_the_browser_option() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let relay = h.handle.relay.clone();
+    let first_socket = pair_with_token(port, &h.paths, "profile-one").await;
+    let (first_seen, first_events) = fake_extension(first_socket, 500);
+    first_events.send(json!({ "method": "ready" })).unwrap();
+    // Finish the first pairing before issuing the second browser's token: accepting it records the pairing on disk,
+    // and pairing two browsers at once could lose one (the pairings file is read and written again).
+    assert!(relay.wait_until(Duration::from_secs(5), |st| st.links.iter().any(|l| l.connected())).await);
+    let second_socket = pair_with_token(port, &h.paths, "profile-two").await;
+    let (second_seen, second_events) = fake_extension(second_socket, 600);
+    second_events.send(json!({ "method": "ready" })).unwrap();
+    relay.wait_until(Duration::from_secs(10), |st| st.links.iter().filter(|l| l.connected()).count() == 2).await;
+    assert_eq!(relay.st().links.iter().filter(|l| l.connected()).count(), 2, "both browsers connect");
+    let browsers: Vec<String> = relay.st().links.iter().map(|l| l.id.clone()).collect();
+    assert!(browsers.contains(&"test-chrome".to_string()) && browsers.contains(&"test-chrome-2".to_string()), "{browsers:?}");
+
+    let named = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail", "browser": "test-chrome" })).await).unwrap())["tab"].as_i64().unwrap();
+    assert_eq!(first_seen.commands("tabs.create").len(), 1);
+    let same = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail", "browser": "test-chrome-2", "url": "https://example.com/" })).await).unwrap());
+    assert_eq!(same["tab"], named, "one id is one tab, whichever browser is named");
+    assert_eq!(same["existed"], true);
+    assert_eq!(second_seen.commands("tabs.create").len(), 0);
+    let other = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "second-id", "browser": "test-chrome-2" })).await).unwrap());
+    assert_ne!(other["tab"], named);
+    assert_eq!(second_seen.commands("tabs.create").len(), 1);
 }

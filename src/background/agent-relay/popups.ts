@@ -87,8 +87,9 @@ export function installPopupAdoption(deps: {
       .catch((error: unknown) => deps.log.add("tab.opened.error", { error: text(error) }))
       // Once it's moved and grouped: the relay attaches it as a page of the opener's session, so the agent's
       // Playwright sees it (page.waitForEvent("popup"), context.pages()).
-      .finally(() => {
-        if (deps.relayTabs.has(sourceTabId)) deps.send({ method: "tabs.opened", params: { tabId, openerTabId: sourceTabId } })
+      .finally(async () => {
+        if (!deps.relayTabs.has(sourceTabId)) return
+        deps.send({ method: "tabs.opened", params: { tabId, openerTabId: sourceTabId } })
       })
   })
 }

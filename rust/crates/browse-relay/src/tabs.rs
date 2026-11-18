@@ -36,6 +36,10 @@ pub struct Attach {
     /// What tools kept for the tab, when it is attached again (a reconnect).
     pub state: Option<Arc<TabState>>,
     pub created_at: Option<String>,
+    /// The caller-chosen id the tab is being opened with.
+    pub chosen: Option<String>,
+    /// Who owned the tab before, found by its target id (a reconnect or a relay restart).
+    pub restored: Option<Restored>,
     pub already_attached: bool,
     /// An inventory tab the extension says an agent opened: it may be reclaimed from the tab registry.
     pub reclaim_held: bool,
@@ -57,6 +61,8 @@ impl Attach {
             opener: None,
             state: None,
             created_at: None,
+            chosen: None,
+            restored: None,
             already_attached: false,
             reclaim_held: false,
             restore: false,
@@ -73,18 +79,21 @@ impl Attach {
         attach.opener = tab.opener;
         attach.state = Some(tab.state.clone());
         attach.created_at = Some(tab.created_at.clone());
+        attach.chosen = tab.chosen.clone();
         attach.fresh_popup = tab.fresh_popup;
         attach
     }
 }
 
 /// Who owned a tab before it was announced again.
-struct Restored {
+#[derive(Clone)]
+pub struct Restored {
     owner: Owner,
     options: TabOptions,
     opener: Option<i64>,
     state: Option<Arc<TabState>>,
     created_at: String,
+    chosen: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -131,14 +140,19 @@ impl Relay {
             }
             bail!("Tab {tab} shows another page now");
         }
-        let restored = if attach.restore { self.restored_owner(&link, &target_id, attach.reclaim_held) } else { None };
+        let restored = if attach.restore {
+            attach.restored.clone().or_else(|| self.restored_owner(&link, &target_id, attach.reclaim_held))
+        } else {
+            None
+        };
         let reclaimed = restored.is_some();
-        let Restored { mut owner, mut options, opener, state, created_at } = restored.unwrap_or_else(|| Restored {
+        let Restored { mut owner, mut options, opener, state, created_at, chosen } = restored.unwrap_or_else(|| Restored {
             owner: attach.owner,
             options: attach.options.clone(),
             opener: attach.opener,
             state: attach.state.clone(),
             created_at: attach.created_at.clone().unwrap_or_else(crate::util::now_iso),
+            chosen: None,
         });
         if reclaimed && owner == Owner::Relay && !url_allowed(&options, &url) {
             rlog!("allowlist.reclaim-refused", tabId = tab);
@@ -147,6 +161,7 @@ impl Relay {
             options = TabOptions::default();
         }
         self.debugger(tab, None, "Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), limit).await?;
+        let keep_open = options.keep_open;
         {
             let mut st = self.st();
             let previous = st.tabs.remove(&tab);
@@ -156,6 +171,7 @@ impl Relay {
             {
                 handoff.done.take().map(|done| done.send("closed"));
             }
+            let kept_chosen = previous.as_ref().and_then(|t| t.chosen.clone());
             // The same page attached again (a renewed debugger) keeps its event stream, CDP handle and state.
             let (events, cdp, state, busy_keys, warnings) = match previous.filter(|p| p.target_id == target_id) {
                 Some(previous) => (previous.events, previous.cdp, previous.state, previous.busy_keys, previous.warnings),
@@ -170,6 +186,7 @@ impl Relay {
                     url,
                     title,
                     owner,
+                    chosen: kept_chosen.or(chosen).or(attach.chosen.clone()),
                     options,
                     opener,
                     state,
@@ -183,6 +200,7 @@ impl Relay {
                     crashed: false,
                     main_frame: Some(target_id.clone()),
                     last_used: Instant::now(),
+                    last_used_at: crate::util::now_iso(),
                     focused: false,
                     fresh_popup: attach.fresh_popup,
                     blanking: 0,
@@ -199,6 +217,8 @@ impl Relay {
         }
         self.schedule_persist();
         self.ext_best_effort(tab, "action.setAttached", json!({ "attached": true }));
+        // The extension runs its own idle cleanup, so it needs the same exemption the relay has.
+        self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
         self.refresh_presentation(tab, true);
         rlog!("target.attached", tabId = tab, owner = owner.name());
         Ok(tab)
@@ -209,10 +229,24 @@ impl Relay {
     fn restored_owner(&self, link: &Link, target_id: &str, reclaim_held: bool) -> Option<Restored> {
         let st = self.st();
         if let Some(known) = st.reconnect_owners.get(target_id).filter(|k| k.browser == link.key) {
-            return Some(Restored { owner: known.owner, options: known.options.clone(), opener: known.opener, state: Some(known.state.clone()), created_at: known.created_at.clone() });
+            return Some(Restored {
+                owner: known.owner,
+                options: known.options.clone(),
+                opener: known.opener,
+                state: Some(known.state.clone()),
+                created_at: known.created_at.clone(),
+                chosen: known.chosen.clone(),
+            });
         }
-        let held = st.restorable.get(target_id).filter(|r| reclaim_held && r.browser_key == link.key)?;
-        Some(Restored { owner: Owner::Relay, options: held.options.clone(), opener: held.opener, state: None, created_at: held.created_at.clone() })
+        let held = st.restorable.get(target_id).filter(|r| reclaim_held && !r.lent && r.browser_key == link.key)?;
+        Some(Restored {
+            owner: Owner::Relay,
+            options: held.options.clone(),
+            opener: held.opener,
+            state: None,
+            created_at: held.created_at.clone(),
+            chosen: held.chosen.clone(),
+        })
     }
 
     /// Forgets a tab: its events end, handoffs on it are cancelled, and the extension (when told) clears what it shows.
@@ -269,8 +303,9 @@ impl Relay {
     }
 
     /// Opens a background agent tab, attaches it blank, then navigates (so the allowlist sees the real load). A tab
-    /// an agent's page opens (`opener`) goes in the opener's browser.
-    pub async fn create_tab(self: &Arc<Self>, url: Option<&str>, options: &TabOptions, opener: Option<i64>) -> anyhow::Result<i64> {
+    /// an agent's page opens (`opener`) goes in the opener's browser. A `chosen` id is kept for the tab, so agents can
+    /// use it as `tab` while the tab lives.
+    pub async fn create_tab(self: &Arc<Self>, url: Option<&str>, options: &TabOptions, opener: Option<i64>, chosen: Option<&str>) -> anyhow::Result<i64> {
         let url = url.filter(|u| !u.is_empty()).unwrap_or("about:blank");
         let mut options = Self::normalize_options(options)?;
         if let Some(refusal) = crate::guardrails::guard("Target.createTarget", &json!({ "url": url }), false, &Vec::new) {
@@ -285,6 +320,9 @@ impl Relay {
         };
         options.browser = None;
         let mut params = json!({ "url": "about:blank", "active": false });
+        if options.keep_open {
+            params["keepOpen"] = true.into();
+        }
         if let Some(window) = crate::settings::agent_window_override() {
             params["window"] = window.into();
         }
@@ -294,6 +332,7 @@ impl Relay {
         let mut attach = Attach::new(tab, Owner::Relay);
         attach.options = options.clone();
         attach.opener = opener;
+        attach.chosen = chosen.map(str::to_string);
         if let Err(error) = self.setup_tab(attach).await {
             rlog!("create.attach-failed", tabId = tab, error = error.to_string());
             self.ext_best_effort(tab, "tabs.remove", json!({}));
@@ -621,6 +660,7 @@ impl Relay {
                 attach.opener = known.opener;
                 attach.state = Some(known.state);
                 attach.created_at = Some(known.created_at);
+                attach.chosen = known.chosen;
                 attach.expect_target = Some(target.clone());
                 match relay.setup_tab(attach).await {
                     Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab),
@@ -663,6 +703,7 @@ impl Relay {
                         opener: t.opener,
                         state: t.state.clone(),
                         created_at: t.created_at.clone(),
+                        chosen: t.chosen.clone(),
                     };
                     (t.target_id.clone(), known)
                 })

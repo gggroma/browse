@@ -59,7 +59,8 @@ pub fn ensure() -> anyhow::Result<Value> {
     }
 }
 
-/// Stops a running relay and waits until it's gone. Agent tabs stay open and the next relay takes them back.
+/// Stops a running relay and waits until it's done: the tab registry and shutdown log are written before relay.json
+/// goes. Agent tabs stay open and the next relay takes them back.
 pub fn stop() -> anyhow::Result<bool> {
     let version = match probe() {
         Probe::Running(version) => version,
@@ -70,17 +71,30 @@ pub fn stop() -> anyhow::Result<bool> {
         return Ok(true);
     }
     let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0 && *pid != std::process::id());
+    let paths = relay_api::paths();
+    let configured = browse_relay::port::configured_port();
+    // The relay removes relay.json after its final tab write and shutdown log (serve.rs). While it still names this
+    // instance, the files it writes as it exits may still come, so uninstall can't delete browse's folders yet.
+    let recorded = browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
     match send("POST", "/shutdown", &[], Some(b"{}"), Some(Duration::from_secs(10))) {
         Ok(response) if (200..300).contains(&response.status) => {}
-        Err(http::Error::Unreachable(_)) => return Ok(true),
+        // It stopped before answering: wait for it to finish with its files below.
+        Err(http::Error::Unreachable(_)) => {}
         Ok(response) => bail!("the browse relay didn't stop: {}", String::from_utf8_lossy(&response.body).trim()),
         Err(error) => bail!("the browse relay didn't stop: {error}"),
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        match probe() {
-            Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()) => {}
-            _ => return Ok(true),
+        let answering = matches!(probe(), Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()));
+        // relay.json is the relay's last write (serve.rs), so while it still names this instance the relay may still be
+        // writing the tab registry and shutdown log. Without one, only its process going tells us it's done. A pid
+        // reused by another process can hold the wait up, but only until the deadline below.
+        let writing = recorded && browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
+        let alive = pid.is_some_and(browse_relay::process_alive);
+        let waiting = if recorded { writing && (pid.is_none() || alive) } else { alive };
+        if !answering && !waiting {
+            return Ok(true);
         }
         if Instant::now() > deadline {
             bail!("the browse relay accepted the shutdown but is still running");
@@ -134,9 +148,10 @@ pub fn start_from(executable: &std::path::Path) -> anyhow::Result<()> {
             command.env(name, value);
         }
     }
+    // Started by browse, not a person in a terminal: it may restart itself onto an update (serve.rs).
     command.env("OPENCODE_BROWSER_MANAGED_RELAY", "1");
     detach(&mut command);
-    command.spawn().context("failed to start the browse relay")?;
+    spawn(&mut command).context("failed to start the browse relay")?;
     Ok(())
 }
 
@@ -147,14 +162,43 @@ fn detach(command: &mut Command) {
     command.process_group(0);
 }
 
+#[cfg(unix)]
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    command.spawn()
+}
+
 #[cfg(windows)]
 fn detach(command: &mut Command) {
+    detach_flags(command, true);
+}
+
+/// Leave the caller's job when it allows it, otherwise stay inside it: a job that forbids breakaway refuses the spawn
+/// with ERROR_ACCESS_DENIED, and a relay that outlives its caller only until that caller's job ends beats no relay.
+/// Retries on any error, like cli/src/relay/windows-launch.ts; the retry's error is the one reported.
+#[cfg(windows)]
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    match command.spawn() {
+        Ok(child) => Ok(child),
+        Err(_) => {
+            detach_flags(command, false);
+            command.spawn()
+        }
+    }
+}
+
+#[cfg(windows)]
+fn detach_flags(command: &mut Command, breakaway: bool) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x8;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+    let mut flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    if breakaway {
+        flags |= CREATE_BREAKAWAY_FROM_JOB;
+    }
+    // Calling this again overwrites the flags, so the retry drops only breakaway.
+    command.creation_flags(flags);
 }
 
 fn send(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u8]>, timeout: Option<Duration>) -> Result<http::Response, http::Error> {
@@ -167,28 +211,41 @@ fn send(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u8]>, t
 }
 
 /// An authorized request to the relay. A relay that is gone (restarted for an update, crashed) is started again and
-/// the request retried once; a request that may have reached the relay is never repeated.
+/// the request retried once; a request that may have reached the relay is never repeated. A relay still starting or
+/// stopping for an update answers 503 before running anything, so that answer is retried until the new one is up.
 fn authorized(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u8]>, timeout: Option<Duration>) -> anyhow::Result<Value> {
     ensure()?;
-    let response = match send(method, path, extra, body, timeout) {
-        Err(http::Error::Unreachable(_)) => {
-            ensure()?;
-            send(method, path, extra, body, timeout)
+    let mut unreachable = false;
+    let mut restarting = 0;
+    loop {
+        let response = match send(method, path, extra, body, timeout) {
+            Err(http::Error::Unreachable(_)) if !unreachable => {
+                unreachable = true;
+                ensure()?;
+                continue;
+            }
+            other => other,
         }
-        other => other,
+        .map_err(|error| anyhow!("the browse relay at {} failed: {error}", relay_api::endpoint()))?;
+        let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+        let waiting = response.status == 503 && matches!(value["code"].as_str(), Some("relay-starting" | "relay-restarting"));
+        if waiting && restarting < 30 {
+            restarting += 1;
+            std::thread::sleep(Duration::from_millis(100));
+            ensure()?;
+            continue;
+        }
+        if !(200..300).contains(&response.status) {
+            let message = value
+                .get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
+            bail!("relay answered {}: {}", response.status, message.trim());
+        }
+        return Ok(value);
     }
-    .map_err(|error| anyhow!("the browse relay at {} failed: {error}", relay_api::endpoint()))?;
-    let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
-    if !(200..300).contains(&response.status) {
-        let message = value
-            .get("error")
-            .and_then(|e| e.get("message").or(Some(e)))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
-        bail!("relay answered {}: {}", response.status, message.trim());
-    }
-    Ok(value)
 }
 
 /// The header naming the MCP client, when there is one: the relay decides its tools and instructions by it.

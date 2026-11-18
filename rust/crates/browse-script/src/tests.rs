@@ -19,7 +19,7 @@ impl Browser for FakeBrowser {
         anyhow::bail!("no tabs here")
     }
     async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
-        Ok(vec![TabInfo { tab: 7, url: "https://example.com/".into(), title: "Example".into(), lent: false, opener: None, options: TabOptions::default() }])
+        Ok(vec![TabInfo { tab: 7, url: "https://example.com/".into(), title: "Example".into(), lent: false, opener: None, chosen: None, last_used: None, busy: false, options: TabOptions::default() }])
     }
     async fn close_tab(&self, _: TabId) -> anyhow::Result<()> {
         Ok(())
@@ -32,6 +32,9 @@ impl Browser for FakeBrowser {
     }
     async fn handoff(&self, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("no handoff here")
+    }
+    async fn read_only(&self, _: TabId) -> bool {
+        false
     }
 }
 

@@ -217,13 +217,16 @@ impl Browser for TestBrowser {
     async fn handoff(&self, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
+    async fn read_only(&self, _: TabId) -> bool {
+        false
+    }
     fn set_busy(&self, _: TabId, key: &str, busy: bool) {
         self.1.lock().unwrap().insert(key.to_string(), busy);
     }
 }
 
 pub fn tab() -> TabInfo {
-    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, options: TabOptions::default() }
+    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, chosen: None, last_used: None, busy: false, options: TabOptions::default() }
 }
 
 /// Arguments in the live tab (`tab` 1).

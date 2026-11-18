@@ -14,18 +14,56 @@ use crate::relay::{Owner, Relay, State};
 
 /// How long a call waits for a browser that is reconnecting (a worker or relay restart) before failing.
 const RECONNECT_WAIT: Duration = Duration::from_secs(12);
+/// How long a just-started relay waits for the paired browser to dial back after a restart. A suspended service worker
+/// wakes on the extension's reconnect alarm, every 30 s (`extensionReconnectAlarmPeriodMs`, src/agent-relay/protocol.ts),
+/// so this covers one alarm plus margin.
+const COLD_START_WAIT: Duration = Duration::from_secs(35);
+/// A browser that connected this recently is expected back after a relay or worker restart.
+const RECENT_CONNECTION: Duration = Duration::from_secs(120);
+/// How long a call waits when no browser was ever paired: opening one is the user's move, not a reconnect.
+const FIRST_CONNECTION_WAIT: Duration = Duration::from_millis(1500);
 /// How long a call naming a tab waits for it to come back with a reconnecting browser.
 const TAB_WAIT: Duration = Duration::from_secs(10);
 
 impl Relay {
+    /// How long ago this relay started. Tests add an offset here instead of sleeping through the cold-start window.
+    fn age(&self) -> Duration {
+        #[cfg(test)]
+        let extra = Duration::from_millis(self.started_ago.load(std::sync::atomic::Ordering::SeqCst));
+        #[cfg(not(test))]
+        let extra = Duration::ZERO;
+        self.started.elapsed() + extra
+    }
+
+    /// Test-only: make this relay look `age` old, for the windows around a restart.
+    #[cfg(test)]
+    pub fn set_age_for_test(&self, age: Duration) {
+        self.started_ago.store(age.as_millis() as u64, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The rest of the cold-start window, never shorter than the first-connection wait.
+    fn cold_start_wait(&self) -> Duration {
+        COLD_START_WAIT.saturating_sub(self.age()).max(FIRST_CONNECTION_WAIT)
+    }
+
     pub fn tab_info(&self, st: &State, tab: i64) -> Option<TabInfo> {
         let entry = st.tabs.get(&tab)?;
         let mut options = entry.options.clone();
         options.browser = st.link(&entry.link_key).map(|l| l.id.clone());
-        Some(TabInfo { tab, url: entry.url.clone(), title: entry.title.clone(), lent: entry.owner == Owner::User, opener: entry.opener, options })
+        Some(TabInfo {
+            tab,
+            url: entry.url.clone(),
+            title: entry.title.clone(),
+            lent: entry.owner == Owner::User,
+            chosen: entry.chosen.clone(),
+            opener: entry.opener,
+            last_used: Some(entry.last_used_at.clone()),
+            busy: st.tab_busy(tab),
+            options,
+        })
     }
 
-    /// Every tab agents can use (theirs and the lent ones), by id.
+    /// Every tab agents can use (the agent-opened ones and the lent ones), by id.
     pub fn tab_infos(&self) -> Vec<TabInfo> {
         let st = self.st();
         let mut ids: Vec<i64> = st.tabs.values().filter(|t| !t.closing).map(|t| t.id).collect();
@@ -53,11 +91,15 @@ impl Relay {
         }
     }
 
-    /// Whether calls can use the tab, or why not.
+    /// Whether calls can use the tab, or why not. A tab the user didn't lend is not attached at all, so it is not a
+    /// browse tab here.
     pub fn usable_tab(&self, tab: i64) -> anyhow::Result<()> {
         let st = self.st();
         if st.tabs.get(&tab).is_some_and(|t| !t.closing) {
             return Ok(());
+        }
+        if st.tabs.contains_key(&tab) {
+            bail!("Tab {tab} is closing.");
         }
         if let Some(gone) = st.gone_tab(tab) {
             bail!("Tab {tab} is gone ({}). Open another with navigate (without tab), or list the tabs you can use with tabs.", gone.why);
@@ -76,7 +118,7 @@ impl Relay {
             let mut st = self.st();
             let was = st.tab_busy(tab);
             if let Some(entry) = st.tabs.get_mut(&tab) {
-                entry.last_used = Instant::now();
+                entry.touch();
             }
             match st.calls.get_mut(&id) {
                 Some(call) => call.tabs.insert(tab) && !was,
@@ -95,19 +137,50 @@ impl Relay {
             None => None,
         };
         let group = options.group.as_deref().and_then(crate::registry::clean_group);
-        Ok(TabOptions { group, allowed_origins, read_only: options.read_only, keep_visible: options.keep_visible, browser: options.browser.clone() })
+        Ok(TabOptions { group, allowed_origins, read_only: options.read_only, keep_visible: options.keep_visible, keep_open: options.keep_open, browser: options.browser.clone() })
+    }
+
+    /// Turns the idle-close exemption on or off for a tab, and tells the extension, which runs its own idle cleanup.
+    /// Returns whether the option changed.
+    pub fn set_keep_open(self: &Arc<Self>, tab: i64, keep_open: bool) -> bool {
+        let changed = {
+            let mut st = self.st();
+            match st.tabs.get_mut(&tab) {
+                Some(entry) if entry.options.keep_open != keep_open => {
+                    entry.options.keep_open = keep_open;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+            self.schedule_persist();
+        }
+        changed
     }
 
     /// The browser to open a tab in: the one named (waiting briefly while it reconnects), else the first connected.
     pub async fn link_for(self: &Arc<Self>, browser: Option<&str>) -> anyhow::Result<Arc<Link>> {
         if let Some(name) = browser.map(str::trim).filter(|n| !n.is_empty()) {
-            // Only a browser browse knows can be reconnecting; any other name fails at once.
-            let known = {
-                let st = self.st();
-                let wanted = name.to_lowercase();
-                st.known.values().any(|k| k.id == wanted || k.name.to_lowercase() == wanted)
-            };
-            let found = known && self.wait_until(RECONNECT_WAIT, |st| st.link_by_name(name).is_some_and(|l| l.connected())).await;
+            // A connected browser is answered without reading the token file.
+            if let Some(link) = self.st().link_by_name(name).filter(|l| l.connected()) {
+                return Ok(link);
+            }
+            // Only a browser browse knows (installed, or paired before) can be reconnecting; any other name fails at once.
+            let pairings = crate::pairing::read_browser_pairings(&self.paths);
+            let wanted = name.to_lowercase();
+            let paired = pairings.values().any(|p| {
+                p.id.as_deref().is_some_and(|id| id.to_lowercase() == wanted) || p.name.as_deref().is_some_and(|n| n.to_lowercase() == wanted)
+            });
+            let known = paired
+                || {
+                    let st = self.st();
+                    st.known.values().any(|k| k.id == wanted || k.name.to_lowercase() == wanted)
+                };
+            let wait = if paired && self.age() < COLD_START_WAIT { self.cold_start_wait() } else { RECONNECT_WAIT };
+            let found = known && self.wait_until(wait, |st| st.link_by_name(name).is_some_and(|l| l.connected())).await;
+
             let st = self.st();
             return match st.link_by_name(name) {
                 Some(link) if found => Ok(link),
@@ -119,11 +192,17 @@ impl Relay {
                 }
             };
         }
-        let recently = {
+        let paired = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
+        let wait = {
             let st = self.st();
-            st.last_connected.is_some_and(|at| at.elapsed() < Duration::from_secs(120)) || !st.links.is_empty()
+            if paired && !st.connected() && self.age() < COLD_START_WAIT {
+                self.cold_start_wait()
+            } else if !st.links.is_empty() || st.last_connected.is_some_and(|at| at.elapsed() < RECENT_CONNECTION) {
+                RECONNECT_WAIT
+            } else {
+                FIRST_CONNECTION_WAIT
+            }
         };
-        let wait = if recently { RECONNECT_WAIT } else { Duration::from_millis(1500) };
         self.wait_until(wait, State::connected).await;
         let link = self.st().links.iter().find(|l| l.connected()).cloned();
         link.ok_or_else(|| anyhow!("{}", self.not_connected_advice()))
@@ -145,18 +224,39 @@ impl Relay {
         tabs.iter()
             .map(|t| {
                 let browser = st.link(&t.link_key).map(|l| l.id.clone());
-                let mut value = json!({ "tab": t.id, "targetId": t.target_id, "url": t.url, "title": t.title, "owner": t.owner.name(), "browser": browser });
+                let mut value = json!({
+                    "tab": t.id,
+                    "targetId": t.target_id,
+                    "url": t.url,
+                    "title": t.title,
+                    "owner": t.owner.name(),
+                    "lent": t.owner == Owner::User,
+                    "browser": browser,
+                    "lastUsed": t.last_used_at,
+                    "busy": st.tab_busy(t.id),
+                });
+                if let Some(chosen) = &t.chosen {
+                    value["id"] = chosen.clone().into();
+                }
                 if let Some(group) = &t.options.group {
                     value["group"] = group.clone().into();
                 }
                 if t.crashed {
                     value["crashed"] = true.into();
                 }
-                if st.tab_busy(t.id) {
-                    value["busy"] = true.into();
-                }
                 value
             })
+            .collect()
+    }
+
+    /// Tabs idle cleanup may close: no call used them for `ttl`. A call, a handoff, a capture or a recording on a tab
+    /// keeps it open, and so does `keepOpen`.
+    pub fn idle_tabs(&self, ttl: Duration) -> Vec<(i64, Owner)> {
+        let st = self.st();
+        st.tabs
+            .values()
+            .filter(|t| !t.options.keep_open && !t.closing && !t.focused && t.last_used.elapsed() >= ttl && st.handoff_for_tab(t.id).is_none() && !st.tab_busy(t.id))
+            .map(|t| (t.id, t.owner))
             .collect()
     }
 
@@ -167,7 +267,7 @@ impl Relay {
         let refused = st.handshake.last_refused.is_some_and(|at| now - at < Duration::from_secs(65));
         let unpaired = st.handshake.last_unpaired.is_some_and(|at| now - at < crate::handshake::UNPAIRED_PRESENCE_TTL);
         let mismatch = if default.is_none() { st.handshake.mismatch.clone() } else { None };
-        let paired_before = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
+        let paired = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
         let state = if st.connected() {
             "connected"
         } else if mismatch.is_some() {
@@ -176,11 +276,12 @@ impl Relay {
             "refused"
         } else if unpaired {
             "unpaired"
-        } else if paired_before {
+        } else if paired {
             "paired-offline"
         } else {
             "not-seen"
         };
+        let reconnecting = state == "paired-offline" && self.age() < COLD_START_WAIT;
         let next = match state {
             "connected" => None,
             _ if default.as_ref().is_some_and(|l| l.unresponsive()) => Some(protocol::BROWSER_UNRESPONSIVE.to_string()),
@@ -197,6 +298,9 @@ impl Relay {
                 "{}. Run `browse install` again: it pairs the browser when it can open it, or prints a code to enter in browse's Options (`browse pair` prints one too).",
                 if state == "refused" { "browse refused the pairing attempt" } else { "browse is installed but not paired" }
             )),
+            "paired-offline" if reconnecting => {
+                Some("The paired browser is reconnecting; try again in a few seconds.".into())
+            }
             "paired-offline" => Some("The paired browser isn't connected right now: open it (the profile with browse) and check that the extension is turned on. It reconnects by itself.".into()),
             _ => Some(format!(
                 "No browser has connected to browse yet. Add the browse extension from https://chromewebstore.google.com/detail/{} (if it's already added, open that browser), then run `browse install` to pair it, or `browse pair` for a code to enter in the extension.",
@@ -230,6 +334,7 @@ impl Relay {
             "protocolVersion": default.as_ref().and_then(|l| l.protocol.version).or(mismatch.as_ref().and_then(|m| m.0)),
             "protocolCompatible": default.as_ref().map(|l| l.protocol.compatible).or(mismatch.as_ref().map(|_| false)),
             "protocolLegacy": default.as_ref().map(|l| l.protocol.legacy),
+            "reconnecting": reconnecting,
             "browsers": browsers,
             "pairingFailures": st.handshake.pairing_failures,
             "activeTargets": st.tabs.len(),
@@ -241,6 +346,16 @@ impl Relay {
     }
 }
 
+/// The read-only flag the relay knows for a tab, whether it is attached, remembered for a reconnecting browser
+/// (`reconnect_owners`), or held across a relay restart (`restorable`). None when nothing knows the tab.
+fn tab_read_only(st: &crate::relay::State, tab: TabId) -> Option<bool> {
+    st.tabs
+        .get(&tab)
+        .map(|entry| entry.options.read_only)
+        .or_else(|| st.reconnect_owners.values().find(|known| known.tab == tab).map(|known| known.options.read_only))
+        .or_else(|| st.restorable.values().find(|held| held.tab == tab).map(|held| held.options.read_only))
+}
+
 /// The relay as `browse_core::Browser`, handed to every tool.
 #[derive(Clone)]
 pub struct RelayBrowser(pub Arc<Relay>);
@@ -248,7 +363,7 @@ pub struct RelayBrowser(pub Arc<Relay>);
 #[async_trait]
 impl Browser for RelayBrowser {
     async fn open_tab(&self, url: Option<&str>, options: &TabOptions) -> anyhow::Result<TabInfo> {
-        let tab = self.0.create_tab(url, options, None).await?;
+        let tab = self.0.create_tab(url, options, None, None).await?;
         self.0.note_call_tab(tab);
         let st = self.0.st();
         self.0.tab_info(&st, tab).context("The tab went away")
@@ -315,7 +430,7 @@ impl Browser for RelayBrowser {
             } else {
                 entry.busy_keys.remove(key);
             }
-            entry.last_used = Instant::now();
+            entry.touch();
             was != st.tab_busy(tab)
         };
         if changed {
@@ -329,5 +444,43 @@ impl Browser for RelayBrowser {
             Some(link) => self.0.human_input_for_link(&link),
             None => crate::settings::human_input_override().unwrap_or(true),
         }
+    }
+
+    async fn read_only(&self, tab: TabId) -> bool {
+        if tab_read_only(&self.0.st(), tab) == Some(true) {
+            return true;
+        }
+        if !self.0.st().tabs.contains_key(&tab) {
+            self.0.await_tab(tab).await;
+        }
+        tab_read_only(&self.0.st(), tab).unwrap_or(false)
+    }
+
+    /// A numeric tab id, or a caller-chosen id like `work-mail`.
+    fn resolve_tab(&self, value: &Value) -> anyhow::Result<TabId> {
+        if let Some(tab) = value.as_i64() {
+            return Ok(tab);
+        }
+        let Some(chosen) = value.as_str().map(str::trim).filter(|id| !id.is_empty()) else {
+            bail!("tab must be an integer tab id or a chosen id like `work-mail`, not {value}");
+        };
+        self.0.resolve_chosen_tab(chosen)
+    }
+}
+
+impl Relay {
+    /// The tab a caller-chosen id like `work-mail` stands for, or why it can't be used.
+    pub fn resolve_chosen_tab(&self, chosen: &str) -> anyhow::Result<TabId> {
+        if !browse_core::valid_chosen_id(chosen) {
+            bail!("tab ids you choose are lowercase slugs like `work-mail` (letters, digits and dashes, starting with a letter), not {chosen:?}");
+        }
+        let st = self.st();
+        if let Some(tab) = st.tab_by_chosen(chosen) {
+            return Ok(tab);
+        }
+        if st.away_tab_by_chosen(chosen).is_some() {
+            bail!("`{chosen}` is in a browser that isn't connected right now. Open that browser and try again; browse gives the tab back when it reconnects.");
+        }
+        bail!("No tab has the id `{chosen}`. Open it with tabs {{ action: \"new\", id: \"{chosen}\", url }}; tabs lists the tabs you can use.")
     }
 }

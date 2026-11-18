@@ -156,9 +156,10 @@ export function createRelayCommands(deps: {
         // of the user's tabs.
         const url = typeof params?.url === "string" ? params.url : "about:blank"
         const active = params?.active === true
+        const keepOpen = params?.keepOpen === true
         deps.log.add("tabs.create.start", { blank: url === "about:blank", active })
         const deadline = Date.now() + CREATE_BUDGET_MS
-        const creating = await TabCleanup.beginCreate(url)
+        const creating = await TabCleanup.beginCreate(url, keepOpen)
         const opened = await AgentWindow.open(url, {
           active,
           ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),
@@ -179,7 +180,7 @@ export function createRelayCommands(deps: {
           lastFocused: opened.lastFocused,
           normalWindows: opened.normalWindows,
         })
-        TabCleanup.track(tab.id)
+        TabCleanup.track(tab.id, { keepOpen })
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.
         void chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
@@ -190,6 +191,9 @@ export function createRelayCommands(deps: {
       }
       case "tabs.remove":
         await TabCleanup.closeAgentTab(number(params, "tabId"))
+        return {}
+      case "tabs.keepOpen":
+        TabCleanup.keepOpen(number(params, "tabId"), params?.keepOpen === true)
         return {}
       case "tabs.group":
         return {

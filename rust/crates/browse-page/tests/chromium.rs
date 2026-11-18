@@ -96,6 +96,125 @@ async fn snapshot_click_fill_and_refs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_navigation_controls_stay_visible() {
+    let h = harness!(false);
+    // A nav of role=button items is content, not a link list: collapsing it would hide every control.
+    let page = h.server.page(
+        "/nav-controls",
+        r#"<!doctype html><div id="a"><h2>A plain div</h2>
+  <div role="button" tabindex="0"><div><span>alice</span><span>hi</span></div></div></div>
+<section id="b"><h2>B section</h2>
+  <div role="button" tabindex="0">bob direct text</div></section>
+<nav aria-label="C nav"><h2>C nav</h2>
+  <div role="button" tabindex="0"><div><span>carol</span></div></div></nav>
+<nav aria-label="Sections"><a href="/a">Alpha</a><a href="/b">Beta</a><a href="/c">Gamma</a></nav>
+<aside aria-label="Aside links"><a href="/s1">S1</a><a href="/s2">S2</a><a href="/s3">S3</a><a href="/s4">S4</a>
+  <a href="/s5">S5</a><a href="/s6">S6</a><a href="/s7">S7</a><a href="/s8">S8</a></aside>
+<nav aria-label="Mobile"><a href="/m">Mobile</a><button style="display:none">Menu</button></nav>
+<nav aria-label="Action nav"><a href="/action" role="button">Action</a></nav>
+<aside style="height:0"><button style="position:absolute">First</button><button style="position:absolute">Second</button></aside>
+<input aria-placeholder="Message only">"#,
+    );
+    h.ok("navigate", json!({ "url": page })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    let carol = ref_of(&snapshot, "button \"carol\"");
+    assert!(carol.starts_with('e'), "carol keeps a compact ref ({carol}):\n{snapshot}");
+    // A pure link list still collapses at its expanded children's heading depth, under the C nav heading.
+    assert!(
+        snapshot.lines().any(|line| line == "  - navigation \"Sections\" [3 links, collapsed]"),
+        "{snapshot}"
+    );
+    assert!(!snapshot.contains("link \"Alpha\""), "{snapshot}");
+    // An aside with enough links still collapses; a hidden button does not keep a link nav open.
+    assert!(snapshot.contains("- navigation \"Aside links\" [8 links, collapsed]"), "{snapshot}");
+    assert!(snapshot.contains("- navigation \"Mobile\" [1 link, collapsed]"), "{snapshot}");
+    // A link whose computed role is button is a control, so its nav stays expanded with a ref.
+    let action = ref_of(&snapshot, "button \"Action\"");
+    assert!(action.starts_with('e'), "the action keeps a ref ({action}):\n{snapshot}");
+    // isVisible doesn't inherit: an invisible aside with visible positioned children still shows them.
+    let first = ref_of(&snapshot, "button \"First\"");
+    let second = ref_of(&snapshot, "button \"Second\"");
+    assert!(first.starts_with('e'), "First keeps a ref ({first}):\n{snapshot}");
+    assert!(second.starts_with('e'), "Second keeps a ref ({second}):\n{snapshot}");
+    // aria-placeholder names a control that has no label, title or placeholder of its own.
+    assert!(snapshot.contains("- textbox \"Message only\" [ref="), "{snapshot}");
+    let found = h.ok("snapshot", json!({ "find": "carol" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+    // find greps the rendered lines, so a collapsed link list has to be expanded for the match.
+    let found_link = h.ok("snapshot", json!({ "find": "Alpha" })).await;
+    assert!(found_link.contains("link \"Alpha\""), "{found_link}");
+    // A find snapshot must not replace the diff baseline: the page did not change since the first snapshot.
+    let diff = h.ok("snapshot", json!({ "diff": true })).await;
+    assert_eq!(
+        diff,
+        format!("0 additions, 0 removals, {} unchanged", snapshot.lines().count()),
+        "{diff}"
+    );
+
+    // interactive asks for controls, so the summary would hide exactly what was asked for.
+    let interactive = h.ok("snapshot", json!({ "interactive": true })).await;
+    assert!(!interactive.contains("navigation \"Sections\""), "{interactive}");
+    let alpha = ref_of(&interactive, "link \"Alpha\"");
+    assert!(alpha.starts_with('e'), "the link keeps a ref ({alpha}):\n{interactive}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_main_scope_note() {
+    let h = harness!(false);
+    let page = h.server.page(
+        "/main-scope-note",
+        r#"<!doctype html><nav aria-label="Thread list">
+  <div role="button" tabindex="0">Thread one</div>
+  <div role="button" tabindex="0">Thread two</div></nav>
+<main><p>x</p><button>Send message</button></main>"#,
+    );
+    h.ok("navigate", json!({ "url": page })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(
+        snapshot.starts_with(
+            "scoped to <main>; 1 landmark and 2 controls outside it are not shown (within: \"body\" to include them)\n"
+        ),
+        "{snapshot}"
+    );
+    assert!(snapshot.contains("button \"Send message\""), "{snapshot}");
+    assert!(!snapshot.contains("Thread one"), "{snapshot}");
+    // An explicit within disables main scoping, so the nav rows are captured instead of noted.
+    let whole = h.ok("snapshot", json!({ "within": "body" })).await;
+    assert!(whole.contains("button \"Thread one\""), "{whole}");
+    assert!(!whole.contains("scoped to <main>"), "{whole}");
+    // find never filters the note out, even when no entry matches.
+    let no_match = h.ok("snapshot", json!({ "find": "nothing on this page" })).await;
+    assert_eq!(
+        no_match,
+        "scoped to <main>; 1 landmark and 2 controls outside it are not shown (within: \"body\" to include them)\nNo snapshot lines matched \"nothing on this page\".",
+        "{no_match}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refs_carry_through_find_snapshots() {
+    let h = harness!(false);
+    let url = h.server.page("/refs-find", "<!doctype html><button>Start</button>");
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("snapshot", json!({})).await;
+    h.ok(
+        "eval",
+        json!({ "expression": "(() => { const button = document.createElement('button'); button.textContent = 'Submit'; document.body.append(button) })()" }),
+    )
+    .await;
+
+    let first = h.ok("snapshot", json!({ "find": "Submit" })).await;
+    let first_ref = ref_of(&first, "button \"Submit\"");
+    // A find snapshot is now the latest snapshot, so the next find reuses the same ref.
+    let second = h.ok("snapshot", json!({ "find": "Submit" })).await;
+    let second_ref = ref_of(&second, "button \"Submit\"");
+    assert_eq!(first_ref, second_ref, "{first}\n---\n{second}");
+    let normal = h.ok("snapshot", json!({})).await;
+    assert_eq!(ref_of(&normal, "button \"Submit\""), first_ref, "{normal}");
+    h.ok("click", json!({ "ref": first_ref })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stealth_isolated_world_and_main_world() {
     let h = harness!(false);
     let url = h.server.page("/s", "<!doctype html><script>window.pageSecret = 42; window.baseline = new Set(Object.getOwnPropertyNames(window).concat(['baseline']))</script><button>Go</button>");
@@ -467,4 +586,49 @@ async fn page_tools_need_a_tab() {
     // Options for a new tab don't apply to an open one.
     let output = h.call("navigate", json!({ "url": "about:blank", "group": "x" })).await;
     assert!(output.is_error && support::text_of(&output).contains("only apply when navigate opens a tab"), "{}", support::text_of(&output));
+}
+
+const READONLY_FORM: &str = r#"<!doctype html><html><head><title>Read-only form</title></head><body>
+<main>
+<h1>Sign up</h1>
+<label>Email <input id="email" name="email"></label>
+<label>Start <input id="start" type="date" name="start"></label>
+<label>Plan <select id="plan"><option value="free">Free</option><option value="pro">Pro plan</option></select></label>
+<label>Attachment <input id="file" type="file" name="file"></label>
+<button id="save" onclick="document.getElementById('out').textContent = 'saved'">Save</button>
+<p id="out">nothing yet</p>
+</main>
+</body></html>"#;
+
+/// A tab opened with readOnly refuses input tools before any CDP work, including the ones that would otherwise
+/// succeed through Runtime JavaScript (select, fill on a select or date input, upload).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_tabs_refuse_input_tools() {
+    let h = match Harness::start_read_only(false).await {
+        Some(h) => h,
+        None => {
+            eprintln!("no Chromium found; skipping");
+            return;
+        }
+    };
+    let url = h.server.page("/readonly-form", READONLY_FORM);
+    h.json("navigate", json!({ "url": url })).await;
+
+    let refused = h.err("select", json!({ "selector": "#plan", "values": ["Pro plan"] })).await;
+    assert!(refused.contains("browse blocked select") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("fill", json!({ "selector": "#plan", "value": "Pro plan" })).await;
+    assert!(refused.contains("browse blocked fill") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("fill", json!({ "selector": "#start", "value": "2026-01-02" })).await;
+    assert!(refused.contains("browse blocked fill") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("upload", json!({ "selector": "#file", "files": ["/tmp/browse-read-only-upload.png"] })).await;
+    assert!(refused.contains("browse blocked upload") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("click", json!({ "selector": "#save" })).await;
+    assert!(refused.contains("browse blocked click") && refused.contains("read-only"), "{refused}");
+
+    // Nothing changed, and reading the page still works.
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('plan').value" })).await, "\"free\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('start').value" })).await, "\"\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('file').files.length" })).await, "0");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('out').textContent" })).await, "\"nothing yet\"");
+    assert!(h.ok("snapshot", json!({})).await.contains("Sign up"));
 }

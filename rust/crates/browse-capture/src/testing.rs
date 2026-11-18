@@ -86,10 +86,13 @@ impl Browser for FakeBrowser {
     async fn handoff(&self, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
+    async fn read_only(&self, _: TabId) -> bool {
+        false
+    }
 }
 
 fn tab() -> TabInfo {
-    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, options: TabOptions::default() }
+    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, chosen: None, last_used: None, busy: false, options: TabOptions::default() }
 }
 
 pub(crate) fn context(cdp: Arc<FakeCdp>, roots: Vec<std::path::PathBuf>) -> ToolContext {

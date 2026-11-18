@@ -23,6 +23,7 @@ use crate::registry::{PersistedTab, RunningCall};
 
 pub type AutoUpdateStatus = Arc<dyn Fn() -> Value + Send + Sync>;
 
+/// Who a tab belongs to: browse opened it for agents (Relay), or the user lent it (User) and gets it back on close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
     Relay,
@@ -52,6 +53,8 @@ pub struct Tab {
     pub url: String,
     pub title: String,
     pub owner: Owner,
+    /// The caller-chosen id (`work-mail`), when `tabs new` was given one.
+    pub chosen: Option<String>,
     /// How an agent tab was opened (normalized allowlist; `browser` unset: `link_key` says which); default for a lent
     /// tab.
     pub options: TabOptions,
@@ -72,6 +75,8 @@ pub struct Tab {
     pub crashed: bool,
     pub main_frame: Option<String>,
     pub last_used: Instant,
+    /// `last_used` as ISO 8601, for the `tabs` list.
+    pub last_used_at: String,
     pub focused: bool,
     pub fresh_popup: bool,
     pub blanking: u32,
@@ -96,6 +101,12 @@ impl Tab {
             self.warnings.push(warning);
         }
     }
+
+    /// An agent command used the tab: idle cleanup and the `tabs` list both read this.
+    pub fn touch(&mut self) {
+        self.last_used = Instant::now();
+        self.last_used_at = crate::util::now_iso();
+    }
 }
 
 /// A tab browse remembers while its browser reconnects: who owned it and what its tools kept.
@@ -109,6 +120,8 @@ pub struct KnownOwner {
     pub opener: Option<i64>,
     pub state: Arc<TabState>,
     pub created_at: String,
+    /// The caller-chosen id, if the tab has one.
+    pub chosen: Option<String>,
 }
 
 /// A tab that went away, kept a little while: calls naming it hear why, and a capture that ended with it can still
@@ -178,6 +191,10 @@ pub struct State {
     pub reconnect_owners: HashMap<String, KnownOwner>,
     /// Agent tabs from the registry of the relay before this one, by target id, until their browser announces them.
     pub restorable: HashMap<String, PersistedTab>,
+    /// Chosen ids (`work-mail`) a `tabs new` is opening right now, so two calls can't open two tabs for one id.
+    pub reserved_chosen: HashMap<String, Instant>,
+    /// The chosen-id tabs running calls hold, by call id: a second call on one gets a busy error instead of interleaving.
+    pub chosen_calls: HashMap<u64, i64>,
     pub gone: VecDeque<GoneTab>,
     pub tombstones: HashMap<String, String>,
     pub handshake: HandshakeStats,
@@ -228,6 +245,38 @@ impl State {
         self.from_relay.get(&tab).map(|(key, _)| key.as_str())
     }
 
+    /// The attached tab with this caller-chosen id.
+    pub fn tab_by_chosen(&self, chosen: &str) -> Option<i64> {
+        self.tabs.values().find(|t| !t.closing && t.chosen.as_deref() == Some(chosen)).map(|t| t.id)
+    }
+
+    /// A tab with this caller-chosen id whose browser is away (disconnected, or between relays).
+    pub fn away_tab_by_chosen(&self, chosen: &str) -> Option<i64> {
+        self.reconnect_owners
+            .values()
+            .find(|k| k.chosen.as_deref() == Some(chosen))
+            .map(|k| k.tab)
+            .or_else(|| self.restorable.values().find(|r| r.chosen.as_deref() == Some(chosen)).map(|r| r.tab))
+    }
+
+    /// Marks a chosen id as being opened, unless another call is doing that (or it is attached already).
+    pub fn reserve_chosen(&mut self, chosen: &str) -> bool {
+        self.reserved_chosen.retain(|_, at| at.elapsed() < Duration::from_secs(120));
+        if self.tab_by_chosen(chosen).is_some() {
+            return false;
+        }
+        self.reserved_chosen.insert(chosen.to_string(), Instant::now()).is_none()
+    }
+
+    pub fn release_chosen(&mut self, chosen: &str) {
+        self.reserved_chosen.remove(chosen);
+    }
+
+    /// A chosen id is opening (a `tabs new` is between its check and its tab being attached).
+    pub fn chosen_reserved(&self, chosen: &str) -> bool {
+        self.reserved_chosen.get(chosen).is_some_and(|at| at.elapsed() < Duration::from_secs(120))
+    }
+
     /// The connected browser a relay tab id belongs to, and the tab's id there.
     pub fn browser_tab(&self, tab: i64) -> Option<(Arc<Link>, i64)> {
         let (key, local) = self.from_relay.get(&tab)?;
@@ -258,9 +307,20 @@ impl State {
         self.handoffs.get(&tab)
     }
 
+    /// A call is running in the tab.
+    pub fn tab_call_busy(&self, tab: i64) -> bool {
+        self.calls.values().any(|c| c.tabs.contains(&tab)) || self.chosen_calls.values().any(|held| *held == tab)
+    }
+
     /// A call is running in the tab, or a capture or recording.
     pub fn tab_busy(&self, tab: i64) -> bool {
-        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.calls.values().any(|c| c.tabs.contains(&tab))
+        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.tab_call_busy(tab)
+    }
+
+    /// Background work or another call is using the tab. The chosen-id hold a running call takes on its own tab is
+    /// not counted, so a tool can still decide whether that tab is idle.
+    pub fn tab_work_busy(&self, tab: i64) -> bool {
+        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.calls.values().any(|call| call.tabs.contains(&tab))
     }
 
     pub fn busy(&self) -> bool {
@@ -353,6 +413,9 @@ pub struct Relay {
     pub instance_id: String,
     pub started_at: String,
     pub started: Instant,
+    /// Test-only: extra age added to `started`, so tests can leave the cold-start window without sleeping through it.
+    #[cfg(test)]
+    pub(crate) started_ago: AtomicU64,
     pub version: String,
     pub build_id: String,
     pub token: String,
@@ -360,18 +423,17 @@ pub struct Relay {
     pub origins: HashSet<String>,
     pub file_roots: Vec<PathBuf>,
     pub auto_update: Option<AutoUpdateStatus>,
-    pub idle_shutdown: Option<Duration>,
     pub idle_tab_ttl: Option<Duration>,
     pub state: Mutex<State>,
     pub changed: Notify,
     pub persist: Notify,
+    /// Serializes tab registry writes and records the shutdown's final write: a persist queued behind it does nothing.
+    pub persist_lock: Mutex<bool>,
     pub stopping: AtomicBool,
     pub stopped: Notify,
     pub tools: RwLock<Vec<Arc<dyn Tool>>>,
     pub next_call: AtomicU64,
     pub ready: AtomicBool,
-    /// Started on demand by a client (OPENCODE_BROWSER_MANAGED_RELAY=1).
-    pub managed: bool,
     /// Who holds `state`, for the watchdog.
     pub holder: Mutex<Option<Holder>>,
     /// Tool calls in flight by call id, for the log.
@@ -390,8 +452,6 @@ pub struct RelayConfig {
     pub version: String,
     pub build_id: String,
     pub auto_update: Option<AutoUpdateStatus>,
-    pub idle_shutdown: Option<Duration>,
-    pub managed: bool,
 }
 
 fn env_ms(variable: &str, fallback: u64) -> Option<Duration> {
@@ -414,6 +474,8 @@ impl Relay {
             instance_id: crate::util::random_hex(16),
             started_at: crate::util::now_iso(),
             started: Instant::now(),
+            #[cfg(test)]
+            started_ago: AtomicU64::new(0),
             version: config.version,
             build_id: config.build_id,
             token,
@@ -421,7 +483,6 @@ impl Relay {
             origins: crate::origins::allowed_extension_origins(),
             file_roots,
             auto_update: config.auto_update,
-            idle_shutdown: config.idle_shutdown,
             idle_tab_ttl: env_ms("OPENCODE_BROWSER_IDLE_TAB_TTL_MS", 15 * 60_000),
             state: Mutex::new(State {
                 links: Vec::new(),
@@ -438,6 +499,8 @@ impl Relay {
                 handoffs: HashMap::new(),
                 reconnect_owners: HashMap::new(),
                 restorable: HashMap::new(),
+                reserved_chosen: HashMap::new(),
+                chosen_calls: HashMap::new(),
                 gone: VecDeque::new(),
                 tombstones: HashMap::new(),
                 handshake: HandshakeStats::default(),
@@ -449,12 +512,12 @@ impl Relay {
             }),
             changed: Notify::new(),
             persist: Notify::new(),
+            persist_lock: Mutex::new(false),
             stopping: AtomicBool::new(false),
             stopped: Notify::new(),
             tools: RwLock::new(Vec::new()),
             next_call: AtomicU64::new(1),
             ready: AtomicBool::new(false),
-            managed: config.managed,
             holder: Mutex::new(None),
             inflight: Mutex::new(HashMap::new()),
             heartbeat: AtomicU64::new(0),
@@ -605,24 +668,55 @@ impl Relay {
         self.persist.notify_one();
     }
 
-    /// Writes the tab registry now: the agent tabs attached, those of a browser that is reconnecting, and those of
-    /// the previous relay not announced again yet.
+    /// Writes the tab registry now: the tabs attached (agent and lent), those of a browser that is reconnecting, and
+    /// those of the previous relay not announced again yet. They are keyed by target id, so a reconnecting browser's
+    /// tabs keep their ids.
     pub fn persist_now(&self) {
+        self.persist(false);
+    }
+
+    /// The shutdown's last registry write. It happens before relay.json goes, and once it has run a persist still queued
+    /// in a blocking task does nothing, so clients that wait for relay.json to go know no later write recreates it.
+    pub fn persist_final(&self) {
+        self.persist(true);
+    }
+
+    fn persist(&self, last: bool) {
+        // A persister task's blocking write can outlive the task's abort, so the finalized flag and the write share one
+        // lock: a queued write either runs before the final one or finds the flag set and does nothing.
+        let mut finalized = self.persist_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *finalized {
+            return;
+        }
+        if last {
+            *finalized = true;
+        }
         let entries: Vec<PersistedTab> = {
             let st = self.st();
             let mut entries: Vec<PersistedTab> = st
                 .tabs
                 .values()
-                .filter(|t| t.owner == Owner::Relay && !t.closing)
-                .map(|t| PersistedTab { tab: t.id, target_id: t.target_id.clone(), browser_key: t.link_key.clone(), opener: t.opener, options: t.options.clone(), created_at: t.created_at.clone() })
+                .filter(|t| !t.closing)
+                .map(|t| PersistedTab {
+                    tab: t.id,
+                    target_id: t.target_id.clone(),
+                    browser_key: t.link_key.clone(),
+                    opener: t.opener,
+                    options: t.options.clone(),
+                    created_at: t.created_at.clone(),
+                    chosen: t.chosen.clone(),
+                    lent: t.owner == Owner::User,
+                })
                 .collect();
-            entries.extend(st.reconnect_owners.iter().filter(|(_, k)| k.owner == Owner::Relay).map(|(target, k)| PersistedTab {
+            entries.extend(st.reconnect_owners.iter().map(|(target, k)| PersistedTab {
                 tab: k.tab,
                 target_id: target.clone(),
                 browser_key: k.browser.clone(),
                 opener: k.opener,
                 options: k.options.clone(),
                 created_at: k.created_at.clone(),
+                chosen: k.chosen.clone(),
+                lent: k.owner == Owner::User,
             }));
             entries.extend(st.restorable.values().cloned());
             entries.sort_by_key(|e| e.tab);

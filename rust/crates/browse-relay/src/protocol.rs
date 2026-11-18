@@ -6,6 +6,7 @@ pub const EXTENSION_PROTOCOL_VERSION: i64 = 3;
 pub const MIN_EXTENSION_PROTOCOL_VERSION: i64 = 3;
 pub const CAPABILITY_TAB_RELEASE: &str = "tab-release";
 pub const PAIRING_SCHEME: &str = "opencode-browser-pairing-v3";
+
 pub const UNPACKED_EXTENSION_ID: &str = "afeafocngkodbmaipcngoamamfmekgfo";
 pub const PUBLIC_STORE_ID: &str = "mfnicocicmmlkpjnaffgihfjhdgjkdjg";
 pub const DEFAULT_PORT: u16 = 19988;
