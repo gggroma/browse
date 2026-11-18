@@ -73,6 +73,16 @@ const sessionNew = Command.make(
   }),
 ).pipe(Command.withDescription("Create a browse session and make it current"))
 
+const sessionNewGrouped = Command.make("new-grouped", {
+  id: Argument.String("id"),
+  title: Flag.String("title"),
+}, Effect.fn("Cli.sessionNewGrouped")(function* ({ id, title }) {
+  const relay = yield* RelayClient.Service
+  yield* ensureCliRelayAndExtension()
+  // Preserve the shared current session; callers must use the returned owned ID explicitly.
+  yield* emitJson(yield* relay.sessionPrepare({ id, title }))
+})).pipe(Command.withDescription("Create an owned background session with a verified collapsed group"))
+
 const sessionGroup = Command.make("group", {
   id: Argument.String("id"),
   title: Flag.String("title").pipe(Flag.optional),
@@ -270,6 +280,7 @@ const session = Command.make("session").pipe(
   Command.withDescription("Manage browse sessions"),
   Command.withSubcommands([
     sessionNew,
+    sessionNewGrouped,
     sessionGroup,
     sessionList,
     sessionCurrent,

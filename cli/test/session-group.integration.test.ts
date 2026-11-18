@@ -2,6 +2,7 @@ import { test, expect } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { spawn } from "node:child_process"
 import { startRelay, stopRelay, FakeExtension } from "./relay-harness.ts"
 import { mcpStdio } from "./support/mcp-stdio.ts"
 
@@ -19,8 +20,24 @@ test("MCP session_group routes only owned physical tabs and preserves read-only 
   const call = async (name: string, args: Record<string, unknown>) => (await mcp.request("tools/call", { name, arguments: args })).result!
   try {
     expect(await extension.pair({ capabilities: ["session-groups"] })).toBe(true)
+    const currentFile = path.join(home, "session.json")
+    const priorCurrent = JSON.stringify({ endpoints: { [`http://127.0.0.1:${relay.port}`]: { id: "other-session" } } })
+    fs.writeFileSync(currentFile, priorCurrent)
+    const cli = spawn(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), "session", "new-grouped", "c-cli", "--title", "C"], {
+      env: { ...process.env, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(relay.port), OPENCODE_BROWSER_AUTOSTART: "false" },
+      windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    })
+    let output = ""
+    cli.stdout.on("data", chunk => { output += chunk })
+    cli.stderr.on("data", chunk => { output += chunk })
+    const cliExit = await new Promise<number | null>(resolve => cli.on("close", resolve))
+    expect(cliExit, output).toBe(0)
+    expect(JSON.parse(output)).toMatchObject({ session: { id: "c-cli" }, groups: [{ title: "C", collapsed: true }] })
+    expect(fs.readFileSync(currentFile, "utf8")).toBe(priorCurrent)
     await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
     mcp.notify("notifications/initialized")
+    expect((await call("session_delete", { id: "c-cli" })).isError).toBe(false)
+    next = 100
     const prepared = await call("session_new_grouped", { id: "c-ready", title: "C" })
     expect(prepared.isError, JSON.stringify(prepared)).toBe(false)
     expect(extension.commands.filter(c => c.method === "session.group").at(-1)?.params).toEqual({

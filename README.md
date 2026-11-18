@@ -498,7 +498,9 @@ data out of Git and command output.
 ### Shared agent setup
 
 The enhanced MCP client provides `session_new_grouped` to prepare a fresh
-background session with a verified collapsed group. Use `investigation_summary`
+background session with a verified collapsed group. The matching CLI offers
+`session new-grouped <id> --title C` (or `M` for Vibe), without changing the
+shared current session. Use `investigation_summary`
 with the session and owned default target ID from status. Page content and
 captured network failures are separate opt-ins. Network `stop` accepts
 `failedOnly` and exact `domains` filters, with result truncation reported.
