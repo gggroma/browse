@@ -142,10 +142,12 @@ export function buildSandboxGlobals(deps: {
     network: {
       start: (options) => Effect.runPromise(deps.networkCapture.start(page, options)),
       status: () => deps.networkCapture.status(),
+      preview: () => deps.networkCapture.preview(),
       stop: () => Effect.runPromise(deps.networkCapture.stop()),
       cancel: () => Effect.runPromise(deps.networkCapture.cancel()),
     },
     pageConsole: {
+      status: (target) => ({ capturing: PageConsole.capturing(target ?? page) }),
       start: (target) => PageConsole.start(target ?? page),
       stop: (target) => PageConsole.stop(target ?? page),
     },

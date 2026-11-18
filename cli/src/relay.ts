@@ -1,4 +1,4 @@
-import { SessionGroupRequest } from "./relay/schema.ts"
+import { SessionGroupRequest, SessionGroupResponse, SettingsGetResponse } from "./relay/schema.ts"
 import crypto from "node:crypto"
 import path from "node:path"
 import { Config, Effect, Option, Schema } from "effect"
@@ -29,6 +29,7 @@ import {
   getString,
   getTargetInfo,
   isRestrictedTarget,
+  isValidSessionId,
   listenHttpServer,
   logCloseError,
   sendCdpEvent,
@@ -59,7 +60,7 @@ import { createRelayTransportServers } from "./relay/transport-server.ts"
 import { RootTargetLifecycle } from "./cdp/root-target-lifecycle.ts"
 import { defaultSessionCatalogPath, SessionCatalog } from "./session-manager/catalog.ts"
 import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-manager/journal.ts"
-import { defaultShutdownTimeoutMs, OpenCodeBrowserSessions } from "./session-manager.ts"
+import { defaultShutdownTimeoutMs, GroupedSetupBlocked, OpenCodeBrowserSessions } from "./session-manager.ts"
 import { SessionNavigationGuard } from "./session-manager/navigation-guard.ts"
 import { TabActivity } from "./cdp/tab-activity.ts"
 import { TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./cdp/target-registry.ts"
@@ -822,27 +823,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     contextDebugLog,
   })
 
-  const relayRequestHandler = createHttpRequestHandler({
-    host,
-    port,
-    browserId,
-    authToken,
-    relayInstance: { id: browserId, startedAt, pid: process.pid, managed },
-    shutdown: shutdownControl,
-    registry,
-    recordingRelay,
-    sessions,
-    sessionGroup: (input) => Effect.gen(function* () {
+  const sessionGroup = (input: unknown, preparing = false) => Effect.gen(function* () {
       const request = yield* Schema.decodeUnknownEffect(SessionGroupRequest)(input)
+      if (sessions.isPreparing(request.id) && !preparing) return yield* Effect.fail(new Error(`Session group setup is in progress: ${request.id}`))
       const summary = sessions.summary(request.id)
-      if (!summary) throw new Error(`Session not found: ${request.id}`)
-      if (summary.readOnly && (request.title !== undefined || request.collapsed !== undefined)) throw new Error("Read-only sessions cannot change groups")
+      if (!summary) return yield* Effect.fail(new Error(`Session not found: ${request.id}`))
+      if (summary.readOnly && (request.title !== undefined || request.collapsed !== undefined)) return yield* Effect.fail(new Error("Read-only sessions cannot change groups"))
       const targets = registry.listRootTargets().filter(t => t.opencodeBrowserSessionId === request.id && t.owner === "relay")
       const byBrowser = new Map<BrowserLink, number[]>()
       for (const target of targets) {
         const mapped = browsers.browserTab(target.tabId)
-        if (!mapped) throw new Error("Session browser is disconnected")
-        if (!mapped.link.rpc.supports("session-groups")) throw new Error("This browser needs the group-controls extension build")
+        if (!mapped) return yield* Effect.fail(new Error("Session browser is disconnected"))
+        if (!mapped.link.rpc.supports("session-groups")) return yield* Effect.fail(new Error("This browser needs the group-controls extension build"))
         const ids = byBrowser.get(mapped.link) ?? []
         ids.push(mapped.tabId)
         byBrowser.set(mapped.link, ids)
@@ -853,7 +845,45 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           ...(request.title === undefined ? {} : { title: request.title }), ...(request.collapsed === undefined ? {} : { collapsed: request.collapsed }) } }, link)
         if (Array.isArray(result.groups)) groups.push(...result.groups)
       }
+      if (!preparing && request.collapsed === true) {
+        const checked = yield* Schema.decodeUnknownEffect(SessionGroupResponse)({ groups })
+        if (checked.groups.length > 0 && checked.groups.every(group => group.collapsed && !group.blocked)) {
+          yield* sessions.releaseGroupBlock(request.id)
+        }
+      }
       return { groups }
+  })
+
+  const relayRequestHandler = createHttpRequestHandler({
+    host,
+    port,
+    browserId,
+    authToken,
+    relayInstance: { id: browserId, startedAt, pid: process.pid, managed },
+    shutdown: shutdownControl,
+    registry,
+    recordingRelay,
+    sessions,
+    sessionGroup: (input) => sessionGroup(input),
+    sessionPrepare: (input) => Effect.gen(function* () {
+      const request = yield* Schema.decodeUnknownEffect(SessionGroupRequest)(input)
+      if (!isValidSessionId(request.id) || !request.title || request.title.length > 28) return yield* Effect.fail(new Error("A valid session ID and group title are required"))
+      const settings = yield* Schema.decodeUnknownEffect(SettingsGetResponse)(yield* settingsSync.httpSettings.get())
+      if (settings.settings.window?.effective !== "current" || settings.settings.grouping?.effective !== "session") {
+        return yield* Effect.fail(new Error("Grouped setup requires current-window placement and session grouping"))
+      }
+      const prepared = yield* sessions.prepareGrouped(request.id, () => Effect.gen(function* () {
+        const result = yield* Schema.decodeUnknownEffect(SessionGroupResponse)(yield* sessionGroup({ id: request.id, title: request.title, collapsed: true }, true))
+        const blocked = result.groups.find(group => group.blocked)
+        if (blocked) return yield* Effect.fail(new GroupedSetupBlocked(`Group setup blocked by ${blocked.blocked}`))
+        if (result.groups.length !== 1 || result.groups.some(group => group.blocked || !group.collapsed || group.title !== request.title || group.tabIds.length !== 1)) {
+          return yield* Effect.fail(new Error("Group setup could not verify one collapsed owned tab"))
+        }
+        return result
+      }).pipe(Effect.mapError((error) => error instanceof GroupedSetupBlocked
+        ? error
+        : new GroupedSetupBlocked(`Group verification failed: ${error.message}`))))
+      return { session: prepared.session, groups: prepared.result.groups }
     }),
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),
     revokeBrowser: (key) => handshake.revokeBrowser(key),

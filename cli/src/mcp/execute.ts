@@ -1,12 +1,60 @@
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import * as RelayClient from "../relay/client.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
+import { opencodeBrowserBuildId } from "../version.ts"
 import { registerMcpTools } from "./registry.ts"
-import { executeToolResult, objectSchema, parseExecuteArguments } from "./schema.ts"
+import { executeToolResult, objectSchema, optionalBooleanField, optionalStringField, parseExecuteArguments, requiredStringField } from "./schema.ts"
 
 registerMcpTools({
   order: 100,
   build: (ctx) => [
+    {
+      name: "investigation_summary",
+      description: "Summarize an explicitly identified owned default tab. Page content and captured network details require separate opt-in flags.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Owned session ID." },
+        targetId: { type: "string", description: "Owned default tab target ID from status." },
+        includePage: { type: "boolean", description: "Include a bounded semantic snapshot and title." },
+        includeNetwork: { type: "boolean", description: "Include bounded redacted failures from an already active capture." },
+        find: { type: "string", description: "Optional snapshot search text." },
+      }, ["session", "targetId"]),
+      readOnly: true, destructive: false, idempotent: false, openWorld: true,
+      outputSchema: Schema.Struct({
+        session: Schema.String, targetId: Schema.String, value: Schema.Unknown,
+        navigationCount: Schema.Number, consoleErrorCount: Schema.Number, pageErrorCount: Schema.Number,
+      }),
+      handle: (input) => Effect.gen(function* () {
+        const sessionId = requiredStringField(input, "session")
+        const targetId = requiredStringField(input, "targetId")
+        const includePage = optionalBooleanField(input, "includePage") === true
+        const includeNetwork = optionalBooleanField(input, "includeNetwork") === true
+        const find = optionalStringField(input, "find")
+        const version = yield* ctx.relay.version
+        if (version.buildId !== opencodeBrowserBuildId) {
+          return yield* Effect.fail(new Error("Investigation requires a matching client and relay build for owned-tab verification"))
+        }
+        const targets = yield* ctx.relay.targets
+        if (!targets.some(target => target.id === targetId && target.owner === "relay" && target.opencodeBrowserSessionId === sessionId)) {
+          return yield* Effect.fail(new Error("Target is not owned by this session"))
+        }
+        const code = `const capture = network.status();
+const preview = ${includeNetwork} && capture.active ? network.preview() : null;
+const matching = preview ? preview.exchanges.filter(e => e.failure || (e.response && e.response.status >= 400)) : [];
+const failures = matching.slice(0, 50).map(e => ({ url: e.request.url, method: e.request.method, status: e.response?.status, failed: !!e.failure }));
+const pageSnapshot = ${includePage} ? await snapshot({ maxItems: 80${find ? `, find: ${JSON.stringify(find)}` : ""} }) : null;
+const pageInfo = pageSnapshot === null ? null : { title: (await page.title()).slice(0, 300), snapshot: pageSnapshot.slice(0, 12000), truncated: pageSnapshot.length > 12000 };
+return { url: ${includePage} ? page.url().split(/[?#]/)[0].slice(0, 2000) : null, page: pageInfo, console: pageConsole.status(), network: { active: capture.active, detailsIncluded: ${includeNetwork}, failures, truncated: matching.length > 50, pending: preview?.pending ?? 0 } };`
+        const result = yield* ctx.relay.execute({ sessionId, expectedOwnedTarget: targetId, code, createIfMissing: false })
+        if (result.isError) return yield* Effect.fail(new Error(result.text))
+        const aftermath = result.aftermath
+        return {
+          session: sessionId, targetId, value: result.value,
+          navigationCount: aftermath?.navigations.length ?? 0,
+          consoleErrorCount: aftermath?.consoleErrorCount ?? 0,
+          pageErrorCount: aftermath?.pageErrorCount ?? 0,
+        }
+      }),
+    },
     {
       name: "execute",
       description: `Execute Playwright JavaScript against the browse session. Code runs in a restricted JavaScript realm on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots (file paths, including Playwright options like screenshot({ path }), must be in folders you own without group/world write access; files.path(name) gives a safe one), and cookie access is limited to the session's pages. Synchronous code stops after about 2 seconds. It is not a security boundary, so treat code as running as the user. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).`,

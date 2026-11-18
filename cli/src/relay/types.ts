@@ -89,6 +89,8 @@ export type OpenCodeBrowserSession = {
    * disconnect while hidden. Tabs the user lent are never kept. Pages can notice.
    */
   keepVisible?: boolean
+  /** A grouped setup was interrupted by user activity; page work waits for verified collapse. */
+  groupBlocked?: boolean
   /** The immutable profile key, plus its agent-facing id. Older catalogs recorded at most the id. */
   browser?: { readonly id: string; readonly key?: string }
   /** Replaced when a stopped script does not settle in time (session-manager.ts). */

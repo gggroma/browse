@@ -36,6 +36,7 @@ export function executeInSession(
     readonly removeAfterExecute?: boolean
     readonly timeoutMs?: number
     readonly targetSelection?: ExecuteTargetSelection
+    readonly expectedOwnedTarget?: string
     readonly browser?: string
   },
 ): Effect.Effect<ExecutionResponse, Error> {
@@ -101,6 +102,9 @@ export function executeInSession(
       if (ctx.sessions.get(session.id) !== session) {
         return yield* sessionError("inactive", `Session is no longer active: ${session.id}`, session.id)
       }
+      if (options.expectedOwnedTarget && (session.target?.owner !== "relay" || session.target.id !== options.expectedOwnedTarget || options.targetSelection)) {
+        return yield* sessionError("invalid-request", "The requested tab is not this session's owned default page", session.id)
+      }
       yield* trySession(() => ctx.resolveBrowser(options.browser, session))
       // Don't dispatch user code into a sleeping browser: it could otherwise run long after its caller gave up.
       if (session.browser?.key && ctx.hooks.checkBrowserResponsive) yield* ctx.hooks.checkBrowserResponsive(session.browser.key).pipe(
@@ -130,6 +134,7 @@ export function executeInSession(
         const script = yield* session.sandbox
           .execute(options.code, {
             ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}),
+            ...(options.expectedOwnedTarget ? { expectedOwnedTarget: options.expectedOwnedTarget } : {}),
             ...(actionTimeoutMs === undefined ? {} : { actionTimeoutMs }),
           })
           .pipe(Effect.forkDetach({ startImmediately: true }))

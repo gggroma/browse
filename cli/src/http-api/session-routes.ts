@@ -90,6 +90,7 @@ export function handleCliRequest(options: {
   readonly pathname: string
   readonly sessions: OpenCodeBrowserSessions
   readonly sessionGroup?: (input: unknown) => Effect.Effect<object, Error>
+  readonly sessionPrepare?: (input: unknown) => Effect.Effect<object, Error>
   readonly registry: TargetRegistry
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
@@ -100,6 +101,11 @@ export function handleCliRequest(options: {
     if (options.pathname === "/cli/session/group" && options.request.method === "POST") {
       if (!options.sessionGroup) throw new Error("Session group controls are unavailable on this relay")
       sendJson(options.response, yield* options.sessionGroup(yield* readJsonBody(options.request)))
+      return
+    }
+    if (options.pathname === "/cli/session/prepare-group" && options.request.method === "POST") {
+      if (!options.sessionPrepare) throw new Error("Grouped session setup is unavailable on this relay")
+      sendJson(options.response, yield* options.sessionPrepare(yield* readJsonBody(options.request)))
       return
     }
     if (options.pathname === "/cli/session/new" && options.request.method === "POST") {
@@ -193,6 +199,7 @@ export function handleCliRequest(options: {
         ...(request.removeAfterExecute ? { removeAfterExecute: true } : {}),
         ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
         ...(request.targetSelection ? { targetSelection: request.targetSelection } : {}),
+        ...(request.expectedOwnedTarget ? { expectedOwnedTarget: request.expectedOwnedTarget } : {}),
         ...(request.browser ? { browser: request.browser } : {}),
       })
       const { setupFailed: _setupFailed, ...wireResult } = result

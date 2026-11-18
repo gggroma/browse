@@ -178,6 +178,7 @@ export type ExecuteResult = {
 
 export type ExecuteOptions = {
   readonly targetSelection?: ExecuteTargetSelection
+  readonly expectedOwnedTarget?: string
   /** Playwright's action budget for this call, when the caller or the relay chose an overall timeout. */
   readonly actionTimeoutMs?: number
 }
@@ -633,6 +634,9 @@ export class ExecuteSandbox extends DefaultPageHost {
 
   private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
     const { browser, context, page } = await this.acquireSessionPage(options.targetSelection)
+    if (options.expectedOwnedTarget && await pageTargetId(page) !== options.expectedOwnedTarget) {
+      throw new Error("The owned page changed before inspection")
+    }
     return buildSandboxGlobals({
       browser,
       context,

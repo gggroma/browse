@@ -54,7 +54,7 @@ test("session options survive a catalog round trip", async () => {
   const { catalog } = temporaryCatalog()
   const now = new Date().toISOString()
   const sessions = [
-    { id: "keep-visible", createdAt: now, updatedAt: now, readOnly: false, keepVisible: true, allowedOrigins: ["https://shop.test"] },
+    { id: "keep-visible", createdAt: now, updatedAt: now, readOnly: false, keepVisible: true, groupBlocked: true, allowedOrigins: ["https://shop.test"] },
     { id: "plain", createdAt: now, updatedAt: now, readOnly: true },
   ]
 

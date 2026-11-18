@@ -53,6 +53,14 @@ export class Recorder {
   private pageEpoch = 0
   private readonly transition = Semaphore.makeUnsafe(1)
 
+  /** Preview completed entries without ending capture. Pending requests are reported by status. */
+  preview() {
+    const active = this.active
+    if (!active) return { active: false, exchanges: [] }
+    const finished = finishCapture(active)
+    return { active: true, exchanges: finished.exchanges, pending: active.pending.size }
+  }
+
   constructor(private readonly recorderOptions: {
     readonly outputSettleTimeoutMs?: number
   } = {}) {}

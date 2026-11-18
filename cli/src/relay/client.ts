@@ -40,6 +40,7 @@ import {
   SessionAdoptResponse,
   SessionGroupRequest,
   SessionGroupResponse,
+  GroupedSessionResponse,
   SessionContainer,
   SessionDeleted,
   SessionResetResponse,
@@ -133,6 +134,7 @@ export interface Interface {
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
   readonly sessionGroup: (request: SessionGroupRequest) => Effect.Effect<SessionGroupResponse, RelayClientError>
+  readonly sessionPrepare: (request: SessionGroupRequest) => Effect.Effect<typeof GroupedSessionResponse.Type, RelayClientError>
   readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[]; readonly keepVisible?: boolean; readonly browser?: string }) => Effect.Effect<SessionSummary, RelayClientError>
   /** Replace a session's allowed origins; an empty list removes the allowlist. */
   readonly sessionAllowlist: (id: string, allowedOrigins: readonly string[]) => Effect.Effect<SessionSummary, RelayClientError>
@@ -491,6 +493,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     targets: getJson("/json/list", TargetSummaries),
     sessions: getJson("/cli/sessions", SessionsContainer).pipe(Effect.map((container) => container.sessions)),
     sessionGroup: (request) => postJson("/cli/session/group", { ...request }, SessionGroupResponse),
+    sessionPrepare: (request) => postJson("/cli/session/prepare-group", { ...request }, GroupedSessionResponse),
     sessionNew: (id, options) =>
       postJson("/cli/session/new", {
         ...(id ? { id } : {}),

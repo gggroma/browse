@@ -524,6 +524,13 @@ test("a toolbar lend of a restored default page clears the sandbox so the next e
     }
     expect(await waitFor(targetGone)).toBe(true)
     replacement.sendReady()
+    // The ready message is asynchronous; wait for the relay to accept it before executing.
+    expect(await waitFor(async () => {
+      const response = await fetch(`http://127.0.0.1:${started.port}/extension/status`, {
+        headers: { authorization: `Bearer ${started.token}` },
+      })
+      return response.ok && (await response.json() as { connected: boolean }).connected
+    })).toBe(true)
     const creates = replacement.commands.filter((command) => command.method === "tabs.create").length
     expect((await executeSession(started.port, started.token, "lend-default", "return page.url()")).isError).toBe(false)
     expect(replacement.commands.filter((command) => command.method === "tabs.create").length).toBeGreaterThan(creates)

@@ -137,8 +137,10 @@ describe("grouping: one group per session", () => {
     await stub.chrome.tabs.update(c.tabId, { active: true })
     // Chrome expands a selected group; the stub does not emulate that side effect.
     await stub.chrome.tabGroups.update(c.groupId, { collapsed: false })
-    const active = await command("session.group", { sessionId: "c-protected", tabIds: [c.tabId], collapsed: true })
+    const originalTitle = group(c.groupId)?.title
+    const active = await command("session.group", { sessionId: "c-protected", tabIds: [c.tabId], title: "changed", collapsed: true })
     expect(active.groups).toEqual([expect.objectContaining({ collapsed: false, blocked: "active-tab" })])
+    expect(group(c.groupId)?.title).toBe(originalTitle)
     expect(tab(c.tabId).active).toBe(true)
     await stub.chrome.tabs.update(userTab, { active: true })
     await command("pageStatus.set", { tabId: c.tabId, status: { state: "waiting", owner: "session", sessionId: "c-protected", message: "Login", handoffId: "protected-login" } })

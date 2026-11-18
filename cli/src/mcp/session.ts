@@ -1,6 +1,6 @@
 import { Effect, Predicate } from "effect"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
-import { SessionAdoptResponse, SessionContainer, SessionGroupResponse, SessionResetResponse, SessionsContainer } from "../relay/schema.ts"
+import { GroupedSessionResponse, SessionAdoptResponse, SessionContainer, SessionGroupResponse, SessionResetResponse, SessionsContainer } from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   CurrentSessionToolOutput,
@@ -21,6 +21,24 @@ import {
 registerMcpTools({
   order: 200,
   build: (ctx) => [
+    {
+      name: "session_new_grouped",
+      description: "Create an owned background session and verify one collapsed group before allowing session work.",
+      inputSchema: objectSchema({
+        id: { type: "string", description: "Unique lowercase session ID." },
+        title: { type: "string", description: "Owned group display title." },
+      }, ["id", "title"]),
+      readOnly: false, destructive: false, idempotent: false, openWorld: false,
+      outputSchema: GroupedSessionResponse,
+      handle: (input) => Effect.gen(function* () {
+        const id = requiredStringField(input, "id")
+        const title = requiredStringField(input, "title")
+        yield* RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, waitForReconnect: true })
+        const result = yield* ctx.relay.sessionPrepare({ id, title })
+        ctx.establishCurrentSession(yield* ctx.caller, id)
+        return result
+      }),
+    },
     {
       name: "session_group",
       description: "Read, rename or collapse only the named session's own tab groups. Codex uses title C; Mistral Vibe uses M. Session IDs stay unique and lowercase. Omit title/collapsed to inspect. Returns verified title, collapsed state and membership; blocked means an active tab or handoff kept the group open. Never focuses tabs/windows or modifies user/shared groups. Pass the explicit owned session ID.",

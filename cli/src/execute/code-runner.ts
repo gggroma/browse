@@ -55,10 +55,12 @@ export type SandboxGlobals = {
   readonly network: {
     readonly start: (options?: NetworkCapture.NetworkCaptureOptions) => Promise<NetworkCapture.NetworkCaptureStatus>
     readonly status: () => NetworkCapture.NetworkCaptureStatus
+    readonly preview: () => ReturnType<NetworkCapture.Recorder["preview"]>
     readonly stop: () => Promise<NetworkCapture.NetworkCaptureResult>
     readonly cancel: () => Promise<{ readonly cancelled: boolean }>
   }
   readonly pageConsole: {
+    readonly status: (page?: Page) => { readonly capturing: boolean }
     readonly start: (page?: Page) => Promise<{ readonly capturing: boolean }>
     readonly stop: (page?: Page) => Promise<{ readonly capturing: boolean }>
   }

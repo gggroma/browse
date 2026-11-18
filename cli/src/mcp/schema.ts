@@ -98,6 +98,7 @@ export const StatusToolOutput = Schema.Struct({
   sharedSession: Schema.Boolean,
   version: RelayVersion,
   status: ExtensionStatus,
+  diagnostics: Schema.optionalKey(Schema.Array(Schema.Struct({ layer: Schema.String, reason: Schema.String, nextStep: Schema.String }))),
   builds: Schema.optionalKey(Schema.Struct({
     client: Schema.String,
     relay: Schema.NullOr(Schema.String),

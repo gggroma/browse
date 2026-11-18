@@ -25,6 +25,7 @@ export const SessionSummary = Schema.Struct({
   readOnly: Schema.optionalKey(Schema.Boolean),
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
   keepVisible: Schema.optionalKey(Schema.Boolean),
+  groupBlocked: Schema.optionalKey(Schema.Boolean),
   browser: Schema.optionalKey(Schema.String),
   handoff: Schema.optionalKey(SessionHandoff),
 })
@@ -91,6 +92,7 @@ export const ExecuteRequest = Schema.Struct({
   removeAfterExecute: Schema.optionalKey(Schema.Boolean),
   timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   targetSelection: Schema.optionalKey(TargetSelection),
+  expectedOwnedTarget: Schema.optionalKey(Schema.String),
 })
 
 export interface ExecuteRequest extends Schema.Schema.Type<typeof ExecuteRequest> {}
@@ -595,3 +597,4 @@ export const SessionGroupResponse = Schema.Struct({ groups: Schema.Array(Schema.
   tabIds: Schema.Array(Schema.Number), blocked: Schema.optionalKey(Schema.String),
 })) })
 export type SessionGroupResponse = Schema.Schema.Type<typeof SessionGroupResponse>
+export const GroupedSessionResponse = Schema.Struct({ session: SessionSummary, groups: SessionGroupResponse.fields.groups })

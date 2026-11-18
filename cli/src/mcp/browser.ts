@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { autoUpdateStatus } from "../update/auto-update.ts"
 import { getObject } from "../relay/helpers.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
@@ -7,8 +7,9 @@ import { securityVariables, settingSpecs, type SettingReport } from "../relay/us
 import { TabsCleanupResponse } from "../relay/schema.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
 import { compareBuildIdentities, repositoryBuild } from "./build-identities.ts"
+import { statusDiagnostics } from "./status-diagnostics.ts"
 import { registerMcpTools } from "./registry.ts"
-import { agentSettingKeys, emptyInputSchema, objectSchema, SettingsToolOutput, StatusToolOutput, valuesSchema } from "./schema.ts"
+import { agentSettingKeys, emptyInputSchema, objectSchema, optionalStringField, SettingsToolOutput, StatusToolOutput, valuesSchema } from "./schema.ts"
 
 /** The settings report without update behaviour: agents may see its value in status but never read or change it here. */
 const agentSettings = (settings: Record<string, SettingReport>) =>
@@ -17,6 +18,56 @@ const agentSettings = (settings: Record<string, SettingReport>) =>
 registerMcpTools({
   order: 110,
   build: (ctx) => [
+    {
+      name: "connection_diagnostics",
+      description: "Identify the failed Browse connection layer and show a supported next step.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional owned session to inspect its groups." } }),
+      readOnly: true, destructive: false, idempotent: true, openWorld: false,
+      outputSchema: Schema.Struct({
+        builds: Schema.optionalKey(StatusToolOutput.fields.builds),
+        diagnostics: Schema.Array(Schema.Struct({
+          layer: Schema.String, reason: Schema.String, nextStep: Schema.String,
+          detail: Schema.optionalKey(Schema.String),
+        })),
+      }),
+      requiresRelayCompatibility: false,
+      handle: (input) => ctx.relay.version.pipe(
+        Effect.flatMap((version) => ctx.relay.extensionStatus.pipe(
+          Effect.map((status) => {
+            const builds = compareBuildIdentities(opencodeBrowserBuildId, version.buildId, status.build, repositoryBuild(ctx.packageRoot))
+            return { builds, diagnostics: statusDiagnostics(status, Boolean(RelayLifecycle.relayBuildProblem(version))) }
+          }),
+          Effect.catch((error) => Effect.succeed({ diagnostics: [{
+            layer: "extension-status", reason: "unavailable",
+            nextStep: "Inspect the extension status error and reconnect only through supported controls.",
+            detail: error.message,
+          }] })),
+        )),
+        Effect.catch((error) => Effect.succeed({ diagnostics: [{
+          layer: "relay", reason: "unavailable",
+          nextStep: "Inspect the relay status and the reported error before retrying.",
+          detail: error.message,
+        }] })),
+        Effect.flatMap((result) => {
+          const session = optionalStringField(input, "session")
+          if (!session) return Effect.succeed(result)
+          return ctx.relay.sessionGroup({ id: session }).pipe(
+            Effect.map((groups) => ({
+              ...result,
+              diagnostics: [...result.diagnostics, ...(groups.groups.length ? [] : [{
+                layer: "group", reason: "no-owned-group", nextStep: "Create and verify an owned grouped page before page work.",
+              }]), ...groups.groups.filter((group) => !group.collapsed || group.blocked).map(() => ({
+                layer: "group", reason: "not-collapsed", nextStep: "Inspect the owned group and preserve active tabs and handoffs.",
+              }))],
+            })),
+            Effect.catch(() => Effect.succeed({
+              ...result,
+              diagnostics: [...result.diagnostics, { layer: "group", reason: "unavailable", nextStep: "Inspect the session and extension group capability." }],
+            })),
+          )
+        }),
+      ),
+    },
     {
       name: "status",
       requiresRelayCompatibility: false,
@@ -32,6 +83,7 @@ registerMcpTools({
           const [version, status] = yield* Effect.all([ctx.relay.version, ctx.relay.extensionStatus])
           const caller = yield* ctx.caller
           const buildProblem = RelayLifecycle.relayBuildProblem(version)
+          const builds = compareBuildIdentities(opencodeBrowserBuildId, version.buildId, status.build, repositoryBuild(ctx.packageRoot))
           const available = updateJson(ctx.update())
           return {
             endpoint: ctx.relay.endpoint,
@@ -39,7 +91,8 @@ registerMcpTools({
             sharedSession: caller.shared,
             version,
             status,
-            builds: compareBuildIdentities(opencodeBrowserBuildId, version.buildId, status.build, repositoryBuild(ctx.packageRoot)),
+            builds,
+            diagnostics: statusDiagnostics(status, Boolean(buildProblem)),
             ...(buildProblem ? { buildProblem } : {}),
             ...(available ? { update: available } : {}),
             autoUpdate: autoUpdateStatus(),

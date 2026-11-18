@@ -11,6 +11,14 @@ import { RelayShutdown, type RelayBusy } from "../src/relay/shutdown.ts"
 const page = { on() {}, off() {}, isClosed: () => false, url: () => "https://example.com/" } as unknown as Page
 
 describe("network capture lifetime", () => {
+  test("preview reports inactive capture and does not end an active one", async () => {
+    const recorder = new Recorder()
+    expect(recorder.preview()).toEqual({ active: false, exchanges: [] })
+    await Effect.runPromise(recorder.start(page))
+    expect(recorder.preview()).toEqual({ active: true, exchanges: [], pending: 0 })
+    expect(recorder.status().active).toBe(true)
+    await Effect.runPromise(recorder.cancel())
+  })
   test("a capture ends by itself after maxDurationMs, and a late stop says why", async () => {
     const recorder = new Recorder()
     const started = await Effect.runPromise(recorder.start(page, { maxDurationMs: 50 }))

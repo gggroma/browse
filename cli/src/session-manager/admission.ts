@@ -15,6 +15,7 @@ export class SessionAdmission {
   constructor(
     private readonly sessions: Map<string, OpenCodeBrowserSession>,
     private readonly hooks: SessionHooks,
+    private readonly includeSession: (id: string) => boolean = () => true,
   ) {}
 
   hasPendingWork(id: string): boolean {
@@ -83,6 +84,9 @@ export class SessionAdmission {
       Effect.try({
         try: () => {
           this.assertAdmission()
+          if (sessionId && this.sessions.get(sessionId)?.groupBlocked) {
+            throw sessionError("inactive", `Session ${sessionId} is waiting for its group to be safely collapsed`, sessionId)
+          }
           return this.retainWork(sessionId)
         },
         catch: (cause) => cause instanceof Error ? cause : new Error("Admit session operation", { cause }),
@@ -104,7 +108,7 @@ export class SessionAdmission {
   }
 
   private persistedSessions(): PersistedSession[] {
-    return Array.from(this.sessions.values(), (session) => persistedSession(session, this.hooks))
+    return Array.from(this.sessions.values()).filter((session) => this.includeSession(session.id)).map((session) => persistedSession(session, this.hooks))
   }
 
   schedulePersistence(): void {

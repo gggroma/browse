@@ -104,6 +104,59 @@ function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, optio
 
 const run = <A>(effect: Effect.Effect<A, unknown>) => Effect.runPromise(effect as Effect.Effect<A, never>)
 
+test("owned-target execution refuses borrowed or changed default pages", async () => {
+  const { sessions, sandboxes } = manager(async () => ok("done"))
+  const session = await run(sessions.create("c-owned"))
+  session.target = { id: "page-1", owner: "user" }
+  await expect(run(sessions.execute({ sessionId: session.id, code: "x", createIfMissing: false, expectedOwnedTarget: "page-1" }))).rejects.toThrow("owned default page")
+  expect(sandboxes[0]?.executions).toBe(0)
+  session.target = { id: "page-2", owner: "relay" }
+  await expect(run(sessions.execute({ sessionId: session.id, code: "x", createIfMissing: false, expectedOwnedTarget: "page-1" }))).rejects.toThrow("owned default page")
+  expect(sandboxes[0]?.executions).toBe(0)
+  await run(sessions.execute({ sessionId: session.id, code: "x", createIfMissing: false, expectedOwnedTarget: "page-2" }))
+  expect(sandboxes[0]?.calls[0]?.expectedOwnedTarget).toBe("page-2")
+  await run(sessions.delete(session.id))
+})
+
+test("grouped setup keeps concurrent work waiting until verification completes", async () => {
+  const { sessions, sandboxes } = manager(async () => ok("done"))
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let verifying = false
+  const setup = run(sessions.prepareGrouped("c-setup", () => Effect.promise(async () => {
+    verifying = true
+    await gate
+    return "verified"
+  })))
+  while (!verifying) await Bun.sleep(1)
+  expect(sessions.listSummaries().some(session => session.id === "c-setup")).toBe(false)
+  let finished = false
+  const concurrent = run(sessions.execute({ sessionId: "c-setup", code: "next", createIfMissing: false })).then(() => { finished = true })
+  await Bun.sleep(20)
+  expect(finished).toBe(false)
+  release()
+  await setup
+  await concurrent
+  expect(sandboxes[0]?.executions).toBe(2)
+  await run(sessions.delete("c-setup"))
+})
+
+test("grouped setup preserves an owned tab when its state is uncertain", async () => {
+  let closeAttempts = 0
+  const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("done")), {
+    onReleaseRelayTarget: () => { closeAttempts += 1; return Effect.void },
+  })
+  const attempt = sessions.prepareGrouped("c-cleanup", () => Effect.gen(function* () {
+    const session = sessions.sessions.get("c-cleanup")!
+    session.target = { id: "target-1", owner: "relay" }
+    return yield* Effect.fail(new Error("group blocked"))
+  }))
+  await expect(run(attempt)).rejects.toThrow("Session c-cleanup and targets target-1 were kept for safe recovery")
+  expect(sessions.listSummaries().some(session => session.id === "c-cleanup")).toBe(true)
+  expect(closeAttempts).toBe(0)
+  await expect(run(sessions.execute({ sessionId: "c-cleanup", code: "x", createIfMissing: false }))).rejects.toThrow("waiting for its group")
+})
+
 /** Starts an execute and waits until its script is running; returns the pending response. */
 async function startExecute(sessions: OpenCodeBrowserSessions, sessionId: string) {
   const response = run(sessions.execute({ sessionId, code: "...", createIfMissing: true }))

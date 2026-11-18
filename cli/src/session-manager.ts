@@ -50,6 +50,8 @@ export function isMcpSession(id: string): boolean {
   return mcpSessionPattern.test(id)
 }
 
+export class GroupedSetupBlocked extends Error {}
+
 /** Sessions browse names itself (an MCP server's implicit session, a generated id, or an opencode session). */
 export function isAutoNamedSession(id: string): boolean {
   return isMcpSession(id) || /^[a-z]+-[a-z]+-\d{3}$/.test(id) || id.startsWith("oc-")
@@ -62,6 +64,7 @@ export class OpenCodeBrowserSessions {
   private readonly createSandbox: (id: string, onDefaultTargetChange: (target: SessionTarget | undefined) => void) => ExecuteSandboxLike
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
+  private readonly preparing = new Set<string>()
   /** Running executes by session: stopping one answers its caller now and ends the script (see execute()). */
   private readonly runningExecutions = new Map<string, RunningExecution>()
   private readonly adoptSemaphore = Semaphore.makeUnsafe(1)
@@ -79,7 +82,7 @@ export class OpenCodeBrowserSessions {
     this.createSandbox = createSandbox ?? ((id, onDefaultTargetChange) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id, onDefaultTargetChange, cpuScheduler: this.cpuScheduler }))
     this.hooks = hooks ?? {}
     this.targetOwnership = targetOwnership ?? new MemoryTargetOwnership()
-    this.admission = new SessionAdmission(this.sessions, this.hooks)
+    this.admission = new SessionAdmission(this.sessions, this.hooks, (id) => !this.preparing.has(id))
     this.adoptionContext = {
       sessions: this.sessions,
       hooks: this.hooks,
@@ -113,7 +116,58 @@ export class OpenCodeBrowserSessions {
   }
 
   listSummaries(): SessionSummary[] {
-    return Array.from(this.sessions.values()).map((session) => sessionSummary(session, this.hooks))
+    return Array.from(this.sessions.values()).filter((session) => !this.preparing.has(session.id)).map((session) => sessionSummary(session, this.hooks))
+  }
+
+  isPreparing(id: string): boolean { return this.preparing.has(id) }
+
+  releaseGroupBlock(id: string): Effect.Effect<void, Error> {
+    const session = this.sessions.get(id)
+    if (!session?.groupBlocked) return Effect.void
+    delete session.groupBlocked
+    return this.admission.commitPersistence()
+  }
+
+  /** Reserve the identity until the new blank page and its owned group are verified. */
+  prepareGrouped<A>(id: string, verify: () => Effect.Effect<A, Error>): Effect.Effect<{ session: SessionSummary; result: A }, Error> {
+    const manager = this
+    return this.admission.withAdmission(id, this.admission.withIdentityChange(id, Effect.gen(function* () {
+      if (manager.sessions.has(id)) return yield* sessionError("already-exists", `Session already exists: ${id}`, id)
+      const session = manager.createOpenCodeBrowserSession(id, false)
+      const browser = yield* trySession(() => manager.resolveBrowser(undefined))
+      if (browser) session.browser = browser
+      manager.preparing.add(id)
+      manager.sessions.set(id, session)
+      const setup = Effect.gen(function* () {
+        const page = yield* session.sandbox.execute("return true").pipe(Effect.interruptible, Effect.timeout("30 seconds"))
+        if (page.isError) return yield* Effect.fail(new Error(page.text))
+        const result = yield* verify()
+        manager.preparing.delete(id)
+        yield* manager.admission.commitPersistence()
+        return { session: sessionSummary(session, manager.hooks), result }
+      })
+      return yield* setup.pipe(Effect.catch((error) => Effect.gen(function* () {
+        if (error instanceof GroupedSetupBlocked) {
+          session.groupBlocked = true
+          manager.preparing.delete(id)
+          yield* manager.admission.commitPersistence()
+          const targets = sessionRelayTargetIds(manager.hooks, session)
+          if (session.target?.owner === "relay") targets.add(session.target.id)
+          return yield* Effect.fail(new Error(`${error.message}. Session ${id} and targets ${[...targets].join(", ")} were kept for safe recovery.`))
+        }
+        const targets = sessionRelayTargetIds(manager.hooks, session)
+        if (session.target?.owner === "relay") targets.add(session.target.id)
+        if (targets.size > 0) {
+          session.groupBlocked = true
+          manager.preparing.delete(id)
+          yield* manager.admission.commitPersistence()
+          return yield* Effect.fail(new Error(`Grouped setup failed: ${error.message}. Session ${id} and targets ${[...targets].join(", ")} were kept for safe recovery.`))
+        }
+        yield* manager.cleanupCreatedSession(session)
+        manager.preparing.delete(id)
+        return yield* Effect.fail(error)
+      })))
+    })).pipe(Effect.uninterruptible))
   }
 
   restore(entries: readonly PersistedSession[]): void {
@@ -158,6 +212,7 @@ export class OpenCodeBrowserSessions {
       })
       if (entry.allowedOrigins && entry.allowedOrigins.length > 0) session.allowedOrigins = entry.allowedOrigins
       if (entry.keepVisible === true) session.keepVisible = true
+      if (entry.groupBlocked === true) session.groupBlocked = true
       if (entry.browser) session.browser = { id: entry.browser, ...(entry.browserKey ? { key: entry.browserKey } : {}) }
       if (target) session.target = target
       if (targets.length > 0) session.targets = targets
@@ -215,7 +270,7 @@ export class OpenCodeBrowserSessions {
     const targets = session.targets ?? []
     if (targets.some((target) => target.id === targetId && target.owner === "relay")) return
     session.targets = [...targets, { id: targetId, owner: "relay" }]
-    this.admission.schedulePersistence()
+    if (!this.preparing.has(session.id)) this.admission.schedulePersistence()
   }
 
   /** Clear a session's default target through its sandbox, so the next execute does not rebind the old page. */
@@ -311,7 +366,7 @@ export class OpenCodeBrowserSessions {
     if (target) session.target = target
     else delete session.target
     session.updatedAt = new Date().toISOString()
-    this.admission.schedulePersistence()
+    if (!this.preparing.has(session.id)) this.admission.schedulePersistence()
   }
 
   createNew(id: string | undefined, options?: SessionCreateOptions): OpenCodeBrowserSession {
@@ -709,6 +764,7 @@ export class OpenCodeBrowserSessions {
     readonly removeAfterExecute?: boolean
     readonly timeoutMs?: number
     readonly targetSelection?: ExecuteTargetSelection
+    readonly expectedOwnedTarget?: string
     readonly browser?: string
   }): Effect.Effect<ExecutionResponse, Error> {
     return executeInSession(this.executionContext, options)

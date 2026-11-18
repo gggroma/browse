@@ -236,21 +236,28 @@ export function createRelayGrouping(deps: {
         throw new Error("Group includes shared, user or another session's tabs")
       groups.push({ group, members })
     }
-    // Publish the desired title before awaited Chrome calls so automatic regrouping uses it too.
-    if (params.title !== undefined) {
-      titles.set(params.sessionId, params.title)
-      await chrome.storage.local.set({ [titlesKey]: Object.fromEntries(titles) })
-    }
     const result = []
     for (const { group } of groups) {
       const members = await chrome.tabs.query({ groupId: group.id })
       if (members.some(t => t.id === undefined || !allowed.has(t.id))) throw new Error("Group membership changed; retry after inspection")
-      if (params.title !== undefined) await chrome.tabGroups.update(group.id, { title: `${params.title}${GROUP_MARKER}` })
-      const blocked = params.collapsed === undefined ? undefined : await AgentGroups.setCollapsed(group.id, params.collapsed)
+      let blocked = members.some(t => t.active) && (params.title !== undefined || params.collapsed !== undefined)
+        ? "active-tab"
+        : params.collapsed === undefined ? undefined : await AgentGroups.setCollapsed(group.id, params.collapsed)
+      if (!blocked && params.title !== undefined && (await chrome.tabs.query({ groupId: group.id })).some(t => t.active)) {
+        blocked = "active-tab"
+      }
+      if (params.title !== undefined && !blocked) {
+        titles.set(params.sessionId, params.title)
+        await chrome.storage.local.set({ [titlesKey]: Object.fromEntries(titles) })
+        await chrome.tabGroups.update(group.id, { title: `${params.title}${GROUP_MARKER}` })
+      }
       const actual = await chrome.tabGroups.get(group.id)
+      const confirmedMembers = await chrome.tabs.query({ groupId: group.id })
+      if (actual.shared || confirmedMembers.some(t => t.id === undefined || !allowed.has(t.id))) throw new Error("Group membership changed during update")
+      if (members.length !== confirmedMembers.length || members.some(t => !confirmedMembers.some(current => current.id === t.id))) throw new Error("Group membership changed during update")
       if (params.collapsed !== undefined && !blocked && actual.collapsed !== params.collapsed) throw new Error("Group state changed during update; inspect before retrying")
       result.push({ id: actual.id, windowId: actual.windowId, title: actual.title?.replace(/\u2063+$/, "") ?? "", collapsed: actual.collapsed,
-        tabIds: members.map(t => t.id!), ...(blocked ? { blocked } : {}) })
+        tabIds: confirmedMembers.map(t => t.id!), ...(blocked ? { blocked } : {}) })
     }
     return { groups: result }
   }

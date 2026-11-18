@@ -235,6 +235,7 @@ export function sessionSummary(session: OpenCodeBrowserSession, hooks?: SessionH
     ...(session.readOnly ? { readOnly: true } : {}),
     ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
     ...(session.keepVisible ? { keepVisible: true } : {}),
+    ...(session.groupBlocked ? { groupBlocked: true } : {}),
     ...(session.browser ? { browser: session.browser.id } : {}),
     ...(handoff ? { handoff } : {}),
   }
@@ -267,6 +268,7 @@ export function persistedSession(session: OpenCodeBrowserSession, hooks?: Pick<S
     readOnly: session.readOnly,
     ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
     ...(session.keepVisible ? { keepVisible: true } : {}),
+    ...(session.groupBlocked ? { groupBlocked: true } : {}),
     ...(session.browser ? { browser: session.browser.id, ...(session.browser.key ? { browserKey: session.browser.key } : {}) } : {}),
     ...(target ? { target } : {}),
     ...(ownedTargets.length > 0 ? { targets: ownedTargets } : {}),
