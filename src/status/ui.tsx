@@ -108,7 +108,7 @@ export function Brand(props: { page?: string; end?: JSX.Element }) {
   return (
     <header class="brand">
       <img src="/icons/icon-48.png" width="24" height="24" alt="" />
-      <span class="brand-name">browse</span>
+      <span class="brand-name">Browse-Agents</span>
       <Show when={props.page}>
         <span class="brand-page">{props.page}</span>
       </Show>

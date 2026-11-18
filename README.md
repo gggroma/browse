@@ -390,7 +390,7 @@ displays `M`. Identical display labels never combine concurrent sessions.
 
 Build both components with the pinned Bun version and
 `bun scripts/build-local.ts`; the stock CLI build does not stamp the local identity. Load this checkout's `dist`
-as the unpacked "browse - local group controls" extension in the existing Chrome profile. Do not edit the
+as the unpacked "Browse-Agents" extension in the existing Chrome profile. Do not edit the
 store-managed extension files or copy a browser profile. A loaded local build
 is required: the stock extension advertises no `session-groups` capability.
 
@@ -454,7 +454,7 @@ currently registered directory, so use **Load unpacked** for this one-time move.
    Enable **Developer mode**, click **Load unpacked**, and select
    `./dist`. Chrome protects this management page from
    the configured browser automation, so perform the folder selection in Chrome.
-3. Open **Details** for **browse - local group controls**. Verify its extension
+3. Open **Details** for **Browse-Agents**. Verify its extension
    ID is `afeafocngkodbmaipcngoamamfmekgfo` and **Loaded from** points to the
    checkout's `dist`. If Chrome refuses the load because the old copy has the
    same ID, confirm the old copy's path before removing it and loading the new
@@ -469,7 +469,7 @@ currently registered directory, so use **Load unpacked** for this one-time move.
 1. Edit and test the source in this checkout. Follow the build identity guidance
    above when runtime code changes. Rebuild with `bun scripts/build-local.ts`.
 2. Once browser work is idle, click the circular **Reload** button for
-   **browse - local group controls** in **Manage Extensions**. Confirm
+   **Browse-Agents** in **Manage Extensions**. Confirm
    **Loaded from** is still the checkout's `dist`.
 3. If relay code changed, wait until the isolated relay has no sessions, then
    restart it with `./scripts/local-browse.ps1 relay restart`. Keep the stock

@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "browse - local group controls",
+  "name": "Browse-Agents",
   "description": "Lets your coding agent use your real browser: open and drive tabs, take screenshots, and hand logins back to you.",
   "version": "0.1.5",
   "minimum_chrome_version": "125",
@@ -12,7 +12,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "browse - local group controls | Click to let agents use this tab",
+    "default_title": "Browse-Agents | Click to let agents use this tab",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
@@ -39,5 +39,5 @@
   "host_permissions": [
     "<all_urls>"
   ],
-  "version_name": "0.1.5-local-groups.2"
+  "version_name": "0.1.5-local-groups.3"
 }
