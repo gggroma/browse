@@ -32,6 +32,9 @@ Chrome artifacts, or restart the paired relay.
    protocol, tool schemas and relevant tests. If upstream replaces a component
    the fork depends on, reconcile its behavior at the new boundary before
    committing.
+   Compare incoming features and changed tool contracts with the local browser
+   workflow. Update the canonical Browse usage guidance and affected dependent
+   skills when those changes alter agent behavior or available capabilities.
 4. Preserve the unpacked extension's manifest key, Chrome identity, and
    checkout-backed installation at `dist`. Follow the README's local version
    and build ID guidance when the merged code changes the extension or relay.

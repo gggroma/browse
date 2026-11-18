@@ -5,6 +5,8 @@ import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { updateJson } from "../update.ts"
 import { securityVariables, settingSpecs, type SettingReport } from "../relay/user-settings.ts"
 import { TabsCleanupResponse } from "../relay/schema.ts"
+import { opencodeBrowserBuildId } from "../version.ts"
+import { compareBuildIdentities, repositoryBuild } from "./build-identities.ts"
 import { registerMcpTools } from "./registry.ts"
 import { agentSettingKeys, emptyInputSchema, objectSchema, SettingsToolOutput, StatusToolOutput, valuesSchema } from "./schema.ts"
 
@@ -37,6 +39,7 @@ registerMcpTools({
             sharedSession: caller.shared,
             version,
             status,
+            builds: compareBuildIdentities(opencodeBrowserBuildId, version.buildId, status.build, repositoryBuild(ctx.packageRoot)),
             ...(buildProblem ? { buildProblem } : {}),
             ...(available ? { update: available } : {}),
             autoUpdate: autoUpdateStatus(),
