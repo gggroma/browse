@@ -67,12 +67,14 @@ export function createRelayDiscovery(deps: {
   readonly reconnect: (reason: string) => void
 }) {
   let lastScan = 0
+  let revision = 0
   /** Ports that answered /version but closed without the relay's proof since the last successful authentication. */
   const unproven = new Set<number>()
 
-  const scan = async (missed: () => void) => {
+  const scan = async (missed: () => void, isCurrent: () => boolean) => {
     const failed = deps.current().port
     const stored = await chrome.storage.local.get([TOKENS_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY])
+    if (!isCurrent()) return
     let proven = relayPortHint(stored[PROVEN_PORT_KEY])
     // A port only a scan found and no connection ever proved is a hint at best: forget it before looking again, so a
     // listener that mimics browse's /version can't keep the next attempt on itself. A proven port is just restarting.
@@ -82,6 +84,8 @@ export function createRelayDiscovery(deps: {
       relayPortHint(stored[DISCOVERED_PORT_KEY]) === failed
     ) await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
     const found = await scanRelayPorts()
+    // Slow probes must not overwrite newer pairing settings or a newly authenticated connection.
+    if (!isCurrent()) return
     // Every candidate refused, or none is browse (the usual "no relay is running"): keep the normal backoff.
     if (found.length === 0) return missed()
     // The proven port just failed without its proof and something else answered: it is no longer the relay here. (When
@@ -89,6 +93,7 @@ export function createRelayDiscovery(deps: {
     if (failed === proven && found.some((port) => port !== failed)) {
       proven = undefined
       await chrome.storage.local.remove(PROVEN_PORT_KEY)
+      if (!isCurrent()) return
     }
     // Skip ports that failed their proof while others answered. If that excludes everything, start over with all.
     let usable = found.filter((port) => !unproven.has(port))
@@ -105,12 +110,16 @@ export function createRelayDiscovery(deps: {
     if (next === undefined || next === failed) return missed()
     deps.log.add("relay.discovery", { found: found.join(","), port: next })
     await chrome.storage.local.set({ [DISCOVERED_PORT_KEY]: next, [DISCOVERED_KIND_KEY]: "scan" })
-    deps.reconnect("discovery")
+    if (isCurrent()) deps.reconnect("discovery")
   }
 
   return {
+    cancelPending() {
+      revision++
+    },
     /** A connection completed the relay's proof: no candidate is suspect anymore, and a close may scan at once. */
     noteAuthenticated() {
+      revision++
       unproven.clear()
       lastScan = 0
     },
@@ -126,7 +135,11 @@ export function createRelayDiscovery(deps: {
       const now = Date.now()
       if (now - lastScan < SCAN_INTERVAL_MS) return false
       lastScan = now
-      void scan(missed).catch(() => missed())
+      const mine = ++revision
+      const isCurrent = () => mine === revision
+      void scan(missed, isCurrent).catch(() => {
+        if (isCurrent()) missed()
+      })
       return true
     },
   }

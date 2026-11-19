@@ -324,6 +324,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   })
 
   const resetAndConnect = (reason: string, closeReason?: string) => {
+    if (reason !== "discovery") discovery.cancelPending()
     attempts = 0
     clearTimeout(retry)
     retry = undefined

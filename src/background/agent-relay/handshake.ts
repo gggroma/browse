@@ -426,7 +426,7 @@ export function createRelayHandshake(deps: {
   }
 
   const onPairingStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-    if (area !== "local" || !(PAIRING_KEY in changes || RELAY_ADDRESS_KEY in changes || BROWSER_NAME_KEY in changes))
+    if (area !== "local" || !(PAIRING_KEY in changes || CODE_PORT_KEY in changes || RELAY_ADDRESS_KEY in changes || BROWSER_NAME_KEY in changes))
       return
     if (
       !(RELAY_ADDRESS_KEY in changes) &&
@@ -452,7 +452,7 @@ export function createRelayHandshake(deps: {
     const code = codeInput.trim() === "" ? undefined : normalizePairingCode(codeInput)
     if (codeInput.trim() !== "" && code === undefined) return { status: "invalid-code" }
     const before = await chrome.storage.local.get([
-      RELAY_ADDRESS_KEY, PAIRING_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY,
+      RELAY_ADDRESS_KEY, PAIRING_KEY, CODE_PORT_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY,
     ])
     const current = deps.hostPort()
     const automatic = deps.automatic()
@@ -480,9 +480,11 @@ export function createRelayHandshake(deps: {
         }).port)
     const clearDiscovered = scannedOnly && relayPortHint(before[DISCOVERED_PORT_KEY]) !== undefined
     const beforeKind = before[DISCOVERED_KIND_KEY] === "hint" ? "hint" : "scan"
+    const codeChanged = code !== undefined && (before[PAIRING_KEY] !== code.code || before[CODE_PORT_KEY] !== codePort)
+    const willReconnectOnWrite = before[RELAY_ADDRESS_KEY] !== value || codeChanged
     const changed =
       (before[RELAY_ADDRESS_KEY] ?? "") !== value ||
-      (code !== undefined && before[PAIRING_KEY] !== code.code) ||
+      codeChanged ||
       (hinted !== undefined && (relayPortHint(before[DISCOVERED_PORT_KEY]) !== hinted || beforeKind !== "hint")) ||
       clearDiscovered
     const outcome = new Promise<AgentRelayStatus>((resolve) => {
@@ -516,7 +518,8 @@ export function createRelayHandshake(deps: {
             }
           : {}),
       })
-    else {
+    // A hint can change while the address, code and code port stay the same.
+    if (!changed || !willReconnectOnWrite) {
       pairingFileRead = undefined
       tokenRefused = undefined
       deps.resetAndConnect("user", "Checking the connection")
@@ -533,7 +536,7 @@ export function createRelayHandshake(deps: {
     if (code === undefined || code.legacy || deps.status() === "connected") return false
     const port = relayPortHint(hint)
     deps.log.add("pairing.link")
-    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY])
+    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY, CODE_PORT_KEY])
     const saved = relayAddress(stored[RELAY_ADDRESS_KEY])
     // A link with no browse-range port is still for this computer. Keep a saved loopback address only when it pins a
     // port outside the relay range (OPENCODE_BROWSER_PORT=9222, say): that browser is deliberately pinned there. Every
@@ -551,8 +554,9 @@ export function createRelayHandshake(deps: {
       [CODE_PORT_KEY]: port ?? defaultRelayPort,
       ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port, [DISCOVERED_KIND_KEY]: "hint" } : {}),
     })
-    // The write reconnects through storage.onChanged; only an unchanged address and code need the explicit nudge.
-    if ((stored[RELAY_ADDRESS_KEY] ?? "") === address && stored[PAIRING_KEY] === code.code)
+    // Reconnect explicitly only if none of the settings the listener watches changed.
+    if (stored[RELAY_ADDRESS_KEY] === address && stored[PAIRING_KEY] === code.code &&
+        stored[CODE_PORT_KEY] === (port ?? defaultRelayPort))
       deps.resetAndConnect("pairing", "Pairing changed")
     return true
   }

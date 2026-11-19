@@ -5,9 +5,17 @@ import { installChrome, settle } from "../chrome-stub"
 // code goes to that port, and when that port later fails a scan can move back to 19988. Run by ../isolated.test.ts.
 
 const stub = installChrome()
+const local = stub.chrome.storage.local
+const setLocal = local.set.bind(local)
+local.set = async (items) => {
+  const previous = await local.get(Object.keys(items))
+  // Chrome emits only changed values for an ordinary local storage write.
+  await setLocal(Object.fromEntries(Object.entries(items).filter(([key, value]) => previous[key] !== value)))
+}
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"
 
 const HINT_PORT = 19990
+const OTHER_HINT_PORT = 19991
 const DEFAULT_PORT = 19988
 const CODE = "ZZZZZZZZ"
 
@@ -81,4 +89,13 @@ test("localhost:19990 with a code is a hint; a later failure scans back to 19988
   const last = at(DEFAULT_PORT).at(-1)!
   expect(last.received.map((message) => message.method)).toEqual(["protocol"])
   expect(last.received).not.toContainEqual(expect.objectContaining({ method: "hello" }))
+})
+
+test("saving the same pairing code at another port reconnects to that port", async () => {
+  void relay.connectTo(`localhost:${HINT_PORT}`, CODE)
+  await until(() => at(HINT_PORT).at(-1)?.received.some((message) => message.method === "hello") === true &&
+    at(HINT_PORT).at(-1)?.readyState === FakeWebSocket.OPEN)
+  void relay.connectTo(`localhost:${OTHER_HINT_PORT}`, CODE)
+  await until(() => at(OTHER_HINT_PORT).some((socket) => socket.received.some((message) => message.method === "hello")))
+  expect(await stored("agentRelayCodePort")).toBe(OTHER_HINT_PORT)
 })

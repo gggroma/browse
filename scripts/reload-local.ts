@@ -10,7 +10,7 @@ if (typeof build !== "string" || !build.trim()) throw new Error("Build the repos
 const endpoint = await verifiedRelayEndpoint()
 if (!endpoint) throw new Error("The configured relay is unavailable or cannot be verified")
 const headers = { authorization: relayAuthorization(), "content-type": "application/json" }
-type Status = { connected?: boolean; pairingState?: string; origin?: string; browsers?: { id: string; connected: boolean }[] }
+type Status = { connected?: boolean; pairingState?: string; origin?: string; build?: string; browsers?: { id: string; connected: boolean }[] }
 let status: Status = {}
 // A managed relay restart can leave the paired extension offline until its reconnect alarm fires.
 for (let attempt = 0; attempt < 45; attempt++) {
@@ -23,6 +23,10 @@ for (let attempt = 0; attempt < 45; attempt++) {
 const connected = status.browsers?.filter(browser => browser.connected) ?? []
 if (!status.connected || status.origin !== "chrome-extension://afeafocngkodbmaipcngoamamfmekgfo" || connected.length !== 1) {
   throw new Error("Expected exactly one connected Browse-Agents browser with the local unpacked identity")
+}
+if (status.build === build) {
+  console.log(`Browse-Agents already connected on ${build}.`)
+  process.exit(0)
 }
 const response = await fetch(`${endpoint}/extension/reload-safe`, {
   method: "POST", headers, body: JSON.stringify({ browser: connected[0]!.id, build }),

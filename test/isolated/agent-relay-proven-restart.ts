@@ -13,9 +13,17 @@ const PORT = 19990
 const TOKEN = "proven-token-0123456789abcdefghijklmnopqrst"
 const CODE = "ZZZZZZZZ"
 const current = installFakeRelaySocket({ port: PORT, token: TOKEN })
-globalThis.fetch = (async (input: string | URL) => {
+let delayedScan: ReturnType<typeof Promise.withResolvers<Response>> | undefined
+let probeStarted = false
+globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
   const url = String(input)
   if (url.endsWith("/relay-pairing.json")) return new Response("not found", { status: 404 })
+  if (delayedScan && init?.method === "GET" && new URL(url).port === String(PORT)) {
+    probeStarted = true
+    return delayedScan.promise
+  }
+  if (delayedScan && init?.method === "GET" && new URL(url).port === "19991")
+    return Response.json({ version: "0.0.2", instanceId: "other-relay" })
   return new URL(url).pathname === "/version" && new URL(url).port === String(PORT)
     ? Response.json({ version: "0.0.2", instanceId: "relay-19990", pid: 1 })
     : new Response("not found", { status: 404 })
@@ -52,9 +60,16 @@ test("a proven scanned port survives its own close and a scan keeps dialling it"
 
 test("a code-only submit while the proven port fails still goes to 19988", async () => {
   // The proven relay just failed; the code-only form sends no address, so the shown port must not become a hint.
+  delayedScan = Promise.withResolvers<Response>()
   current().drop(1006)
+  await until(() => probeStarted)
   void relay.connectTo("", CODE)
-  await until(async () => (await stored("agentRelayCodePort")) === 19988)
+  await until(() => current().url.includes(":19988/"))
+  // A slow scan of the previous address must not write its result over this manual change.
+  delayedScan.resolve(new Response(null, { status: 404 }))
+  await settle()
+  await settle()
   expect(await stored("agentRelayCodePort")).toBe(19988)
   expect(await stored("agentRelayDiscoveredPort")).toBeUndefined()
+  expect(await stored("agentRelayProvenPort")).toBe(PORT)
 })
