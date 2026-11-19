@@ -276,6 +276,8 @@ export function createRelayHandshake(deps: {
     )
   }
 
+  const isCurrentOpen = (current: WebSocket) => deps.currentSocket() === current && current.readyState === WebSocket.OPEN
+
   /** Keeps the token a code was exchanged for, and spends the code. */
   const adoptToken = async (token: string, code: PairingCode) => {
     await rememberToken(token)
@@ -360,9 +362,10 @@ export function createRelayHandshake(deps: {
         const key = await pairingSessionKey(await pairingCodeMaterial(using.code), secret, transcript)
         if (!using.code.legacy) {
           // Prove the code; the relay finds which of its pending codes it is and answers with auth.token.
-          if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
+          const proof = await sessionProof(key, "extension")
+          if (!isCurrentOpen(current)) return
           pending.session = { key, relayNonce }
-          current.send(JSON.stringify({ method: "auth.code", params: { proof: await sessionProof(key, "extension") } }))
+          current.send(JSON.stringify({ method: "auth.code", params: { proof } }))
           return
         }
         if (!sameSecret(await sessionProof(key, "relay"), params?.proof)) return refuse("wrong proof")
@@ -370,17 +373,18 @@ export function createRelayHandshake(deps: {
       }
     }
     handshakes.delete(current)
-    if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
+    if (!isCurrentOpen(current)) return
     if (token === undefined) return refuse("no token")
     if (using.kind === "code") await adoptToken(token, using.code)
     else await rememberToken(token)
-    if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
-    current.send(
-      JSON.stringify({
-        method: "auth.response",
-        params: { proof: await pairingProof(token, "extension", pending.port, pending.nonce, relayNonce) },
-      }),
-    )
+    const proof = await pairingProof(token, "extension", pending.port, pending.nonce, relayNonce)
+    // Crypto and storage both yield. Check the socket after the final await before sending or marking it ready.
+    if (!isCurrentOpen(current)) return
+    current.send(JSON.stringify({ method: "auth.response", params: { proof } }))
+    // Only this computer's automatic connection makes a port proven: an explicit or remote address stays pinned.
+    if (deps.automatic() && deps.hostPort().host === "127.0.0.1")
+      await chrome.storage.local.set({ [PROVEN_PORT_KEY]: pending.port })
+    if (!isCurrentOpen(current)) return
     // The protocols the relay speaks (newer relays say): outside them, the relay keeps this connection but sends no
     // work, so show which side to update instead of "connected".
     const range = pending.protocol
@@ -390,10 +394,6 @@ export function createRelayHandshake(deps: {
         : typeof range?.min === "number" && extensionProtocolVersion < range.min
           ? "update-extension"
           : undefined
-    // Only this computer's automatic connection makes a port proven: a remote relay and the PORT_KEY dev pin are
-    // dialled exactly as given, so they must not overwrite the port the form and scans treat as proven.
-    if (deps.automatic() && deps.hostPort().host === "127.0.0.1")
-      await chrome.storage.local.set({ [PROVEN_PORT_KEY]: pending.port })
     trusted.add(current)
     tokenRefused = undefined
     codeRejected = false
@@ -404,9 +404,10 @@ export function createRelayHandshake(deps: {
       // The cleanup tracking says who opened the tab: a tab it doesn't track (or couldn't tell us about) is not an
       // agent's, so the relay releases it rather than closing it.
       const agent = (await withTimeout(TabCleanup.isTracked(tabId), OWNER_TIMEOUT_MS)) === true
-      if (deps.currentSocket() !== current) return
+      if (!isCurrentOpen(current)) return
       current.send(JSON.stringify({ method: "debugger.attached", params: { tabId, ...(agent ? { agent: true } : {}) } }))
     }
+    if (!isCurrentOpen(current)) return
     current.send(JSON.stringify({ method: "ready" }))
     deps.log.add("hello", { tabs: deps.relayTabs.size, protocol: extensionProtocolVersion })
     deps.onAuthenticated(current, skew)

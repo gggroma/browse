@@ -326,6 +326,7 @@ export function createRelayCommands(deps: {
   }
 
   const handle = async (current: WebSocket, data: string) => {
+    if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
     const command = (() => {
       let parsed: unknown
       try {

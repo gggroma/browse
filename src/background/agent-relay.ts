@@ -477,6 +477,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }, CONNECT_TIMEOUT)
     current.onopen = () => {
       clearTimeout(timeout)
+      if (socket !== current || current.readyState !== WebSocket.OPEN) return
       openedAt = Date.now()
       log.add("open", { port, generation: mine })
       // Older relays require hello first. Detect them before either side tries an incompatible code exchange.
