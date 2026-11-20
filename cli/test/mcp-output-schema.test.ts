@@ -519,11 +519,20 @@ test("session_group is discoverable and forwards explicit session and display co
   let forwarded: unknown
   const ctx = createMcpToolContext({ relay: { sessionGroup: (args: unknown) => {
     forwarded = args
-    return Effect.succeed({ groups: [{ id: 1, windowId: 2, title: "C", collapsed: true, tabIds: [3] }] })
+    return Effect.succeed({ groups: [{ id: 1, windowId: 2, title: "A", collapsed: true, tabIds: [3] }] })
   }} as unknown as RelayClient.Interface, currentSession: { id: "other", established: true }, packageRoot: "/tmp/browse" })
-  const tool = buildRegisteredMcpTools(ctx).find(t => t.name === "session_group")!
+  const tools = buildRegisteredMcpTools(ctx)
+  const newGrouped = tools.find(t => t.name === "session_new_grouped")!
+  expect(newGrouped).toBeDefined()
+  expect(JSON.stringify(newGrouped.inputSchema)).toContain("Antigravity")
+  const tool = tools.find(t => t.name === "session_group")!
+  expect(tool.description).toContain("Codex")
+  expect(tool.description).toContain("Antigravity")
+  expect(tool.description).toContain("Mistral Vibe")
+  expect(tool.description).toContain("any other agent")
+  expect(JSON.stringify(tool.inputSchema)).not.toContain("Display label C or M")
   expect(tool.inputSchema.required).toContain("session")
-  const result = await Effect.runPromise(tool.handle({ session: "c-owned", title: "C", collapsed: true }))
-  expect(forwarded).toEqual({ id: "c-owned", title: "C", collapsed: true })
-  expect(result).toMatchObject({ groups: [{ title: "C", collapsed: true, tabIds: [3] }] })
+  const result = await Effect.runPromise(tool.handle({ session: "a-owned", title: "A", collapsed: true }))
+  expect(forwarded).toEqual({ id: "a-owned", title: "A", collapsed: true })
+  expect(result).toMatchObject({ groups: [{ title: "A", collapsed: true, tabIds: [3] }] })
 })

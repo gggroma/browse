@@ -74,8 +74,8 @@ const sessionNew = Command.make(
 ).pipe(Command.withDescription("Create a browse session and make it current"))
 
 const sessionNewGrouped = Command.make("new-grouped", {
-  id: Argument.String("id"),
-  title: Flag.String("title"),
+  id: Argument.String("id").pipe(Argument.withDescription("Owned lowercase session ID")),
+  title: Flag.String("title").pipe(Flag.withDescription("Display label: uppercase first letter of the agent's name (e.g., C, A, M)")),
 }, Effect.fn("Cli.sessionNewGrouped")(function* ({ id, title }) {
   const relay = yield* RelayClient.Service
   yield* ensureCliRelayAndExtension()
@@ -84,8 +84,8 @@ const sessionNewGrouped = Command.make("new-grouped", {
 })).pipe(Command.withDescription("Create an owned background session with a verified collapsed group"))
 
 const sessionGroup = Command.make("group", {
-  id: Argument.String("id"),
-  title: Flag.String("title").pipe(Flag.optional),
+  id: Argument.String("id").pipe(Argument.withDescription("Owned lowercase session ID")),
+  title: Flag.String("title").pipe(Flag.optional, Flag.withDescription("Display label: uppercase first letter of the agent's name (e.g., C, A, M)")),
   collapse: Flag.Boolean("collapse").pipe(Flag.withDefault(false)),
   expand: Flag.Boolean("expand").pipe(Flag.withDefault(false)),
 }, Effect.fn("Cli.sessionGroup")(function* ({ id, title, collapse, expand }) {
