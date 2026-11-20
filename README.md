@@ -499,8 +499,9 @@ data out of Git and command output.
 
 The enhanced MCP client provides `session_new_grouped` to prepare a fresh
 background session with a verified collapsed group. The matching CLI offers
-`session new-grouped <id> --title C` (or `M` for Vibe), without changing the
-shared current session. Use `investigation_summary`
+`session new-grouped <id> --title <LETTER>` (`C` for Codex, `A` for Antigravity,
+`M` for Mistral Vibe, or the first uppercase letter of any other agent's name),
+without changing the shared current session. Use `investigation_summary`
 with the session and owned default target ID from status. Page content and
 captured network failures are separate opt-ins. Network `stop` accepts
 `failedOnly` and exact `domains` filters, with result truncation reported.
@@ -525,20 +526,9 @@ $runtime = Join-Path (Split-Path $checkout -Parent) '.ai-folder/tools/browse-gro
 If the checkout was moved, use the existing runtime path from local agent
 configuration instead of the newly calculated default so pairing is preserved.
 
-Codex registers this under `[mcp_servers.browse]` in its user config. Mistral Vibe
-uses a stdio `[[mcp_servers]]` entry named `browse`. Preserve other config fields
-and credentials. Existing chats can cache old tool schemas: use the matching
-`./scripts/local-browse.ps1` immediately, or load the saved registration through a
-new chat or supported MCP refresh. Do not restart unrelated chats.
+Codex registers this under `[mcp_servers.browse]` in `C:/Users/Roman/.codex/config.toml`, Antigravity under `"browse"` in `C:/Users/Roman/.gemini/config/mcp_config.json`, and Mistral Vibe under `[[mcp_servers]]` (`name = "browse"`) in `C:/Users/Roman/.vibe/config.toml`. Any other MCP-capable agent registers the same `node D:/Repositories/browse/cli/dist/cli.mjs mcp` command with the two `OPENCODE_BROWSER_*` env vars above. Preserve other config fields and credentials. Existing chats can cache old tool schemas: use the matching `./scripts/local-browse.ps1` immediately, or load the saved registration through a new chat or supported MCP refresh. Do not restart unrelated chats.
 
-The canonical browser-interactions skill remains in
-`~/.codex/skills/browser-interactions`; Vibe discovers that same
-folder through its `skill_paths`. Browse Agents is the primary route for Codex
-and the only browser route for Mistral Vibe. Codex may use signed-in native
-ChatGPT Chrome under the shared skill's emergency rules. Native groups use the
-single U+1F50E icon where supported. Browse groups use C for Codex and M for Vibe.
-Keep explicit, unique lowercase session IDs on every Browse call, verify group
-state after tab churn, and close only owned tabs and sessions after browser work.
+The canonical browser-interactions skill remains in `~/.codex/skills/browser-interactions` (discovered by Antigravity via its `global-user-skills` junction and by Vibe through `skill_paths`). Browse Agents is the shared main-Chrome route for Codex, Antigravity, Mistral Vibe, and any other Browse-capable agent. Codex may use signed-in native ChatGPT Chrome under the shared skill's emergency rules. Native groups use the single U+1F50E icon where supported. Browse groups use the first uppercase letter of the agent's name (`C` for Codex, `A` for Antigravity, `M` for Mistral Vibe, `<FIRST_LETTER>` for any other agent). Keep explicit, unique lowercase session IDs starting with that matching letter on every Browse call, verify group state after tab churn, and close only owned tabs and sessions after browser work.
 
 Do not publish directly to upstream. Push this development branch to the fork
 only after review and relevant checks; upstream synchronization is a separate
