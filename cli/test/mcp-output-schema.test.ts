@@ -512,6 +512,10 @@ describe("advertised tool schemas", () => {
     expect(parseSettingChanges({ groupCollapse: "off" })).toEqual({ groupCollapse: "off" })
     expect(parseSettingChanges({ groupCollapse: "auto" })).toEqual({ groupCollapse: "auto" })
     expect(() => parseSettingChanges({ groupCollapse: "sometimes" })).toThrow(SettingsInputError)
+    // muteTabs is the same kind of switch.
+    expect(parseSettingChanges({ muteTabs: "on" })).toEqual({ muteTabs: "on" })
+    expect(parseSettingChanges({ muteTabs: "off" })).toEqual({ muteTabs: "off" })
+    expect(() => parseSettingChanges({ muteTabs: "quiet" })).toThrow(SettingsInputError)
   })
 })
 
@@ -535,4 +539,20 @@ test("session_group is discoverable and forwards explicit session and display co
   const result = await Effect.runPromise(tool.handle({ session: "a-owned", title: "A", collapsed: true }))
   expect(forwarded).toEqual({ id: "a-owned", title: "A", collapsed: true })
   expect(result).toMatchObject({ groups: [{ title: "A", collapsed: true, tabIds: [3] }] })
+})
+
+test("session_new_grouped accepts and forwards a selected browser", async () => {
+  let forwarded: unknown
+  const ctx = createMcpToolContext({ relay: { extensionStatus: Effect.succeed({ connected: true }), sessionPrepare: (args: unknown) => {
+    forwarded = args
+    return Effect.succeed({
+      session: { id: "c-opera", browser: "opera-private-ll" },
+      groups: [{ id: 1, windowId: 2, title: "C", collapsed: true, tabIds: [3] }],
+    })
+  }} as unknown as RelayClient.Interface, currentSession: { id: "other", established: true }, packageRoot: "/tmp/browse" })
+  const tool = buildRegisteredMcpTools(ctx).find(t => t.name === "session_new_grouped")!
+  expect(tool.inputSchema.properties).toHaveProperty("browser")
+  const result = await Effect.runPromise(tool.handle({ id: "c-opera", title: "C", browser: "opera-private-ll" }))
+  expect(forwarded).toEqual({ id: "c-opera", title: "C", browser: "opera-private-ll" })
+  expect(result).toMatchObject({ session: { id: "c-opera", browser: "opera-private-ll" }, groups: [{ title: "C", collapsed: true }] })
 })

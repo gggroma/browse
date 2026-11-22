@@ -212,16 +212,17 @@ describe("several browsers", () => {
 
   test("browsers connect side by side, each named, the first the default; sessions open tabs in theirs", async () => {
     const work = browser("TARGET-WORK")
-    expect(await work.pair({ hello: { profileId: "work", name: "Work Chrome" } })).toBe(true)
+    expect(await work.pair({ hello: { profileId: "work", name: "Work Chrome", build: "work-build" } })).toBe(true)
     const homeBrowser = browser("TARGET-HOME")
-    expect(await homeBrowser.pair({ hello: { profileId: "home", name: "Home Brave" } })).toBe(true)
+    expect(await homeBrowser.pair({ hello: { profileId: "home", name: "Home Brave", build: "home-build" } })).toBe(true)
     await Bun.sleep(100)
     // The second browser didn't push the first one out.
     expect(work.socket.readyState).toBe(WebSocket.OPEN)
-    const status = await (await api("/extension/status")).json() as { browsers: { id: string; name: string; default: boolean }[] }
-    expect(status.browsers.map(({ id, name, default: isDefault }) => ({ id, name, isDefault }))).toEqual([
-      { id: "work-chrome", name: "Work Chrome", isDefault: true },
-      { id: "home-brave", name: "Home Brave", isDefault: false },
+    const status = await (await api("/extension/status")).json() as { build: string; browsers: { id: string; name: string; default: boolean; build: string | null }[] }
+    expect(status.build).toBe("work-build")
+    expect(status.browsers.map(({ id, name, default: isDefault, build }) => ({ id, name, isDefault, build }))).toEqual([
+      { id: "work-chrome", name: "Work Chrome", isDefault: true, build: "work-build" },
+      { id: "home-brave", name: "Home Brave", isDefault: false, build: "home-build" },
     ])
 
     const unknown = await api("/cli/session/new", { id: "on-nothing", browser: "nope" })
@@ -395,7 +396,7 @@ describe("settings from the extension", () => {
 
 /** A fake extension holding settings the way the real one does (settings.get / settings.set over its storage). */
 function settingsExtension(code: string, relayPort = port) {
-  const stored: Record<string, unknown> = { window: "current", grouping: "session", groupCollapse: "auto", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" }
+  const stored: Record<string, unknown> = { window: "current", grouping: "session", groupCollapse: "auto", idleMinutes: 10, muteTabs: "off", humanInput: "on", handoffNotifications: "recording" }
   const extension = new FakeExtension(code, relayPort)
     .on("settings.get", () => ({ settings: { ...stored } }))
     .on("settings.set", (command) => {
@@ -422,6 +423,7 @@ describe("the settings tool's relay API", () => {
     expect(got.status).toBe(200)
     expect(got.body.settings.grouping).toMatchObject({ value: "session", effective: "session", allowed: ["shared", "session", "none"] })
     expect(got.body.settings.groupCollapse).toMatchObject({ value: "auto", effective: "auto", allowed: ["auto", "off"] })
+    expect(got.body.settings.muteTabs).toMatchObject({ value: "off", effective: "off", allowed: ["on", "off"] })
     expect(got.body.note).toContain("OPENCODE_BROWSER_ALLOW_NODE")
 
     const set = await settingsRequest(base, token, { grouping: "shared", idleMinutes: "never", humanInput: "on" })
@@ -442,10 +444,17 @@ describe("the settings tool's relay API", () => {
     expect(sets()).toEqual([{ grouping: "shared", idleMinutes: 0, humanInput: "on" }, { groupCollapse: "off" }])
     expect(stored.groupCollapse).toBe("off")
 
+    const mute = await settingsRequest(base, token, { muteTabs: "on" })
+    expect(mute.status).toBe(200)
+    expect(mute.body.changed).toEqual([{ key: "muteTabs", from: "off", to: "on" }])
+    expect(sets()).toEqual([{ grouping: "shared", idleMinutes: 0, humanInput: "on" }, { groupCollapse: "off" }, { muteTabs: "on" }])
+    expect(stored.muteTabs).toBe("on")
+
     // Invalid values, unknown keys and security switches are refused before anything reaches the extension.
     for (const [request, expected] of [
       [{ grouping: "Shared" }, "grouping must be one of shared, session, none"],
       [{ groupCollapse: "sometimes" }, "groupCollapse must be one of auto, off"],
+      [{ muteTabs: "quiet" }, "muteTabs must be one of on, off"],
       [{ idleMinutes: 45 }, "idleMinutes must be one of 10, 30, 60, never"],
       [{ colour: "blue" }, "Unknown setting \"colour\""],
       [{ OPENCODE_BROWSER_ALLOW_NODE: "1" }, "security switches"],
@@ -456,18 +465,19 @@ describe("the settings tool's relay API", () => {
       expect(refused.status).toBe(400)
       expect(String(refused.body.error)).toContain(expected)
     }
-    expect(sets()).toHaveLength(2)
+    expect(sets()).toHaveLength(3)
     extension.close()
     await Bun.sleep(200)
   }, 20_000)
 
-  test("an extension that predates groupCollapse reads as auto", async () => {
+  test("an extension that predates groupCollapse and muteTabs reads their defaults", async () => {
     const older = new FakeExtension(home, port)
       .on("settings.get", () => ({ settings: { window: "current", grouping: "shared", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" } }))
     expect(await older.pair()).toBe(true)
     const got = await settingsRequest(base, token)
     expect(got.status).toBe(200)
     expect(got.body.settings.groupCollapse).toMatchObject({ value: "auto", effective: "auto", allowed: ["auto", "off"] })
+    expect(got.body.settings.muteTabs).toMatchObject({ value: "off", effective: "off", allowed: ["on", "off"] })
     older.close()
     await Bun.sleep(200)
   }, 20_000)

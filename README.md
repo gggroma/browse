@@ -122,7 +122,10 @@ For any other stdio MCP client, run `browse mcp`:
 ```
 
 (`browse install --agent none` prints this with your path.) Re-running install updates the entries it wrote and
-leaves servers named browse that it didn't write alone.
+leaves servers named browse that it didn't write alone. With `OPENCODE_BROWSER_PORT` set, install writes the port into
+each entry's environment so agents start `browse mcp` on the relay the extension is paired with. dsh and Mistral Vibe
+are the exception: add `OPENCODE_BROWSER_PORT` to their env by hand (an entry you write yourself needs it too). Install
+never removes a port it wrote, so if you stop pinning, delete it from those entries or re-run install with the new port.
 
 ### Pairing
 
@@ -214,13 +217,17 @@ extension from your browser to finish.
   tab lends it again. Chrome's own pages, the Web Store included, can't be lent.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button. While a tab is recorded you get a system notification instead of the card.
+- **Uploads.** Large files, or sites that reject copied files, work when the browser is on the same computer and the
+  extension has "Allow access to file URLs" turned on in the browser's extensions page (browse → Details): that lets
+  the extension read files on this computer, and browse only hands it files from its file roots. Otherwise browse
+  copies the files in, up to 50 MB per call.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new
   tabs open in the default browser unless `browser` names another.
 - **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),
   grouping (one shared group, one per task, or none), whether browse collapses agent groups by itself or leaves them
   as you set them (a handoff still opens its group so you can find the tab), when idle tabs close (10, 30, 60 minutes
-  or never), human-like input, and handoff notifications. Agents can read and change these with the `settings` tool
-  when you ask them to.
+  or never), whether agent tabs open muted, human-like input, and handoff notifications. Agents can read and change
+  these with the `settings` tool when you ask them to.
 
 ## Tools
 
@@ -329,7 +336,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long to wait for a bot check the browser clears by itself |
 | `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command |
 | `OPENCODE_BROWSER_PING_TIMEOUT_MS=10000` | How long a ping may go unanswered before the browser counts as asleep |
-| `OPENCODE_BROWSER_PORT=20000` | Pin the relay's port, with no fallback. The extension finds only browse's own ports (19988, 19990–19997) by itself, so enter `localhost:<port>` as its relay address when you pair |
+| `OPENCODE_BROWSER_PORT=20000` | Pin the relay's port, with no fallback. The extension finds only browse's own ports (19988, 19990–19997) by itself, so enter `localhost:<port>` as its relay address when you pair. Running `browse install` with it set writes it into each agent's MCP entry, so agents start `browse mcp` on it (dsh and Mistral Vibe need it added by hand); install never removes a port it wrote, so stop pinning by deleting it or re-running install with the new port |
 | `OPENCODE_BROWSER_TOOLS=plain\|execute\|all` | Which tools every client gets |
 
 ## Troubleshooting
@@ -417,10 +424,14 @@ saved Codex and Vibe registrations advertised all 14 enhanced MCP tools.
 ## Fork build and browser updates
 
 This branch preserves the previously tested TypeScript backend and adds explicit
-session group controls. The fork's upstream `dev` branch is separate and may
-contain newer backend changes; review and integrate those deliberately. Do not
-reset this branch to upstream or run the stock installer to update this fork.
-The existing implementation commits are retained in this branch's history.
+session group controls. Official upstream now includes a Rust runtime and keeps
+`cli/` as a TypeScript reference. This fork's local Browse-Agents setup still
+uses the enhanced TypeScript MCP/relay for explicit group controls, so upstream
+syncs must preserve that path while integrating and verifying Rust changes too.
+Do not silently switch local registrations to the Rust runtime unless the
+group-control contract is implemented and verified there. Do not reset this
+branch to upstream or run the stock installer to update this fork. The existing
+implementation commits are retained in this branch's history.
 
 ### Build from the fork
 
@@ -484,8 +495,11 @@ load Opera only when requested or when the needed account exists only there.
    `./scripts/local-browse.ps1 relay restart` after the relay is idle. Never
    force a restart to clear another agent's work. The relay restores saved
    sessions and pairing.
-4. Run `./scripts/reload-local.ps1`. It waits briefly for a paired extension
-   to reconnect after a relay restart. The authenticated relay drains accepted
+4. Run `./scripts/reload-local.ps1`. If multiple browsers are connected, pass
+   the selected browser ID from status, for example
+   `./scripts/reload-local.ps1 opera-private-ll`; without an ID, the script
+   proceeds only when exactly one browser is connected. It waits briefly for a
+   paired extension to reconnect after a relay restart. The authenticated relay drains accepted
    work, blocks new work, refuses active targets and reloads only the selected
    local unpacked extension. It verifies a new connection with the exact build
    in `dist/build.json`. A busy, disconnected, ambiguous, older or mismatched
@@ -507,10 +521,15 @@ data out of Git and command output.
 ### Shared agent setup
 
 The enhanced MCP client provides `session_new_grouped` to prepare a fresh
-background session with a verified collapsed group. The matching CLI offers
-`session new-grouped <id> --title <LETTER>` (`C` for Codex, `A` for Antigravity,
-`M` for Mistral Vibe, or the first uppercase letter of any other agent's name),
-without changing the shared current session. Use `investigation_summary`
+background session with a verified collapsed group. Pass the selected browser's
+current ID from `browse status --json` in the `browser` property for both Chrome
+and Opera; connection order can make the implicit default differ from the
+Chrome-first task preference. The matching CLI offers
+`session new-grouped <id> --title <LETTER> --browser <ID>` (`C` for Codex,
+`A` for Antigravity, `M` for Mistral Vibe, or the first uppercase letter of any
+other agent's name), without changing the shared current session. For multi-tab
+work, navigate sequentially rather than concurrently; see the shared
+browser-selection and efficiency guide. Use `investigation_summary`
 with the session and owned default target ID from status. Page content and
 captured network failures are separate opt-ins. Network `stop` accepts
 `failedOnly` and exact `domains` filters, with result truncation reported.
@@ -537,7 +556,7 @@ configuration instead of the newly calculated default so pairing is preserved.
 
 Codex registers this under `[mcp_servers.browse]` in `C:/Users/Roman/.codex/config.toml`, Antigravity under `"browse"` in `C:/Users/Roman/.gemini/config/mcp_config.json`, and Mistral Vibe under `[[mcp_servers]]` (`name = "browse"`) in `C:/Users/Roman/.vibe/config.toml`. Any other MCP-capable agent registers the same `node D:/Repositories/browse/cli/dist/cli.mjs mcp` command with the two `OPENCODE_BROWSER_*` env vars above. Preserve other config fields and credentials. Existing chats can cache old tool schemas: use the matching `./scripts/local-browse.ps1` immediately, or load the saved registration through a new chat or supported MCP refresh. Do not restart unrelated chats.
 
-The canonical browser-interactions skill remains in `~/.codex/skills/browser-interactions` (discovered by Antigravity via its `global-user-skills` junction and by Vibe through `skill_paths`). Browse Agents is the shared Chrome-default route for Codex, Antigravity, Mistral Vibe, and any other Browse-capable agent; select Opera explicitly when requested or when the needed account exists only there. Pass the chosen browser ID when creating a session. Codex may use signed-in native ChatGPT Chrome under the shared skill's emergency rules. Native groups use the single U+1F50E icon where supported. Browse groups use the first uppercase letter of the agent's name (`C` for Codex, `A` for Antigravity, `M` for Mistral Vibe, `<FIRST_LETTER>` for any other agent). Keep explicit, unique lowercase session IDs starting with that matching letter on every Browse call, verify group state after tab churn, and close only owned tabs and sessions after browser work.
+The shared `browser-interactions` skill in the canonical user-level skills catalog defines browser routing and safety. Browse Agents is the shared Chrome-default route for Codex, GitHub Copilot, Antigravity, Mistral Vibe, and any other Browse-capable agent; select Opera explicitly when requested or when the needed account exists only there. Read both browser IDs from `browse status --json`; pass the selected ID as `browser` to MCP `session_new_grouped`, or `--browser <id>` to `session new-grouped`. Connection order can make the implicit default differ from the Chrome-first preference. Grouped creation waits for the selected browser to finish grouping its first owned tab, then verifies the collapsed group before page work. For multiple pages, navigate sequentially in one owned session rather than launching concurrent `goto` calls; use known URLs, one grounded snapshot, whole-value fills, and delete only the owned session when done. Codex may use signed-in native ChatGPT Chrome under the shared skill's emergency rules. Native groups use the single U+1F50E icon where supported. Browse group titles are `C` for Codex, `Cp` for GitHub Copilot, `A` for Antigravity, `M` for Mistral Vibe, and the first uppercase letter for other agents. Use unique lowercase session IDs; Codex and Copilot both use `c`, so Copilot sessions need distinct `c-...` IDs. Verify group state after tab churn, and close only owned tabs and sessions after browser work.
 
 Do not publish directly to upstream. Push this development branch to the fork
 only after review and relevant checks; upstream synchronization is a separate

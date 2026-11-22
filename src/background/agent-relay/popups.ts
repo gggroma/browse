@@ -40,6 +40,7 @@ export function installPopupAdoption(deps: {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab) return
     void chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => undefined)
+    void TabCleanup.muteIfEnabled(tabId).catch(() => undefined)
     const [agentWindow, openerWindow] = await Promise.all([
       AgentWindow.id(),
       chrome.tabs.get(opener).then((openerTab) => openerTab.windowId, () => undefined),

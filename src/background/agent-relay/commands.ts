@@ -6,7 +6,7 @@ import {
   type JsonObject,
   type PageStatus,
 } from "../../agent-relay/protocol"
-import type { AgentRelayUpdate, RelayAutoUpdate, RelayOverrides } from "../../shared/protocol"
+import { type AgentRelayUpdate, type RelayAutoUpdate, type RelayOverrides } from "../../shared/protocol"
 import { AgentGroups } from "./groups"
 import { AgentWindow } from "./window"
 import { DebuggerHub } from "../debugger-hub"
@@ -181,9 +181,9 @@ export function createRelayCommands(deps: {
           normalWindows: opened.normalWindows,
         })
         TabCleanup.track(tab.id, { keepOpen })
-        // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
-        // wait on it.
+        // A discarded tab loses the debugger and the agent's page. A Chrome call that hangs must not hold the answer.
         void chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
+        void TabCleanup.muteIfEnabled(tab.id).catch(() => undefined)
         // The tab is tracked in memory; clearing the creation marker must not hold the answer past the budget.
         await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
         if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log, deadline)
