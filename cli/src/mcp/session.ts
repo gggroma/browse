@@ -25,25 +25,27 @@ registerMcpTools({
       name: "session_new_grouped",
       description: "Create an owned background session and verify one collapsed group before allowing session work.",
       inputSchema: objectSchema({
-        id: { type: "string", description: "Unique lowercase session ID prefixed with the agent's first letter (e.g., c-..., a-..., m-...)." },
-        title: { type: "string", description: "Owned group display title: uppercase first letter of the agent's name (C for Codex, A for Antigravity, M for Mistral Vibe, or first letter for any other agent)." },
+        id: { type: "string", description: "Unique lowercase session ID prefixed with the agent's first letter (e.g., c-..., a-..., m-...). Codex and GitHub Copilot both use c, so their IDs must be distinct." },
+        title: { type: "string", description: "Owned group title: C for Codex, Cp for GitHub Copilot, A for Antigravity, M for Mistral Vibe, or the agent's uppercase first letter." },
+        browser: ctx.browserProperty,
       }, ["id", "title"]),
       readOnly: false, destructive: false, idempotent: false, openWorld: false,
       outputSchema: GroupedSessionResponse,
       handle: (input) => Effect.gen(function* () {
         const id = requiredStringField(input, "id")
         const title = requiredStringField(input, "title")
+        const browser = optionalStringField(input, "browser")
         yield* RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, waitForReconnect: true })
-        const result = yield* ctx.relay.sessionPrepare({ id, title })
+        const result = yield* ctx.relay.sessionPrepare({ id, title, ...(browser ? { browser } : {}) })
         ctx.establishCurrentSession(yield* ctx.caller, id)
         return result
       }),
     },
     {
       name: "session_group",
-      description: "Read, rename or collapse only the named session's own tab groups. Use the first uppercase letter of the agent's name (C for Codex, A for Antigravity, M for Mistral Vibe, or first letter for any other agent). Session IDs stay unique and lowercase. Omit title/collapsed to inspect. Returns verified title, collapsed state and membership; blocked means an active tab or handoff kept the group open. Never focuses tabs/windows or modifies user/shared groups. Pass the explicit owned session ID.",
+      description: "Read, rename or collapse only the named session's own tab groups. Use C for Codex, Cp for GitHub Copilot, A for Antigravity, M for Mistral Vibe, or any other agent's uppercase first letter. Session IDs stay unique and lowercase. Omit title/collapsed to inspect. Returns verified title, collapsed state and membership; blocked means an active tab or handoff kept the group open. Never focuses tabs/windows or modifies user/shared groups. Pass the explicit owned session ID.",
       inputSchema: objectSchema({ session: { type: "string", description: "Required owned session ID." },
-        title: { type: "string", minLength: 1, maxLength: 28, description: "Display label using the agent's uppercase first letter (e.g., C, A, M), independent of session ID." },
+        title: { type: "string", minLength: 1, maxLength: 28, description: "Display label: C for Codex, Cp for GitHub Copilot, A for Antigravity, M for Mistral Vibe, or the agent's uppercase first letter; independent of session ID." },
         collapsed: { type: "boolean", description: "True folds inactive groups; active tabs/handoffs prevent collapse." },
       }, ["session"]),
       readOnly: false, destructive: false, idempotent: true, openWorld: false,

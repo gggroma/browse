@@ -40,6 +40,7 @@ import {
   SessionAdoptResponse,
   SessionGroupRequest,
   SessionGroupResponse,
+  SessionPrepareRequest,
   GroupedSessionResponse,
   SessionContainer,
   SessionDeleted,
@@ -134,7 +135,7 @@ export interface Interface {
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
   readonly sessionGroup: (request: SessionGroupRequest) => Effect.Effect<SessionGroupResponse, RelayClientError>
-  readonly sessionPrepare: (request: SessionGroupRequest) => Effect.Effect<typeof GroupedSessionResponse.Type, RelayClientError>
+  readonly sessionPrepare: (request: SessionPrepareRequest) => Effect.Effect<typeof GroupedSessionResponse.Type, RelayClientError>
   readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[]; readonly keepVisible?: boolean; readonly browser?: string }) => Effect.Effect<SessionSummary, RelayClientError>
   /** Replace a session's allowed origins; an empty list removes the allowlist. */
   readonly sessionAllowlist: (id: string, allowedOrigins: readonly string[]) => Effect.Effect<SessionSummary, RelayClientError>

@@ -187,6 +187,7 @@ export class ExtensionHandshake {
         connected: browser.rpc.connected,
         ...(browser.rpc.unresponsive ? { unresponsive: true } : {}),
         version: browser.rpc.version ?? null,
+        build: browser.build ?? null,
         tabs: registry.listRootTargets().filter((target) => browsers.ownerKey(target.tabId) === browser.key).length,
       })),
       rejectedConnections: 0,

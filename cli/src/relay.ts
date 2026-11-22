@@ -1,4 +1,4 @@
-import { SessionGroupRequest, SessionGroupResponse, SettingsGetResponse } from "./relay/schema.ts"
+import { SessionGroupRequest, SessionGroupResponse, SessionPrepareRequest, SettingsGetResponse } from "./relay/schema.ts"
 import crypto from "node:crypto"
 import path from "node:path"
 import { Config, Effect, Option, Schema } from "effect"
@@ -867,13 +867,25 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     sessions,
     sessionGroup: (input) => sessionGroup(input),
     sessionPrepare: (input) => Effect.gen(function* () {
-      const request = yield* Schema.decodeUnknownEffect(SessionGroupRequest)(input)
+      const request = yield* Schema.decodeUnknownEffect(SessionPrepareRequest)(input)
       if (!isValidSessionId(request.id) || !request.title || request.title.length > 28) return yield* Effect.fail(new Error("A valid session ID and group title are required"))
       const settings = yield* Schema.decodeUnknownEffect(SettingsGetResponse)(yield* settingsSync.httpSettings.get())
       if (settings.settings.window?.effective !== "current" || settings.settings.grouping?.effective !== "session") {
         return yield* Effect.fail(new Error("Grouped setup requires current-window placement and session grouping"))
       }
       const prepared = yield* sessions.prepareGrouped(request.id, () => Effect.gen(function* () {
+        const tabIds = registry.listRootTargets()
+          .filter(target => target.owner === "relay" && target.opencodeBrowserSessionId === request.id)
+          .map(target => target.tabId)
+        if (tabIds.length === 0) return yield* Effect.fail(new Error("Grouped setup did not create an owned tab"))
+        for (const tabId of tabIds) {
+          yield* Effect.tryPromise({ try: () => presentation.ensureTabGrouping(tabId), catch: cause => cause instanceof Error ? cause : new Error(String(cause)) })
+          const link = browsers.browserTab(tabId)?.link
+          if (!link) return yield* Effect.fail(new Error("Grouped setup lost its browser connection"))
+          const grouped = yield* sendToExtension({ method: "tabs.group", params: { tabId, sessionId: request.id } }, link)
+          const groupId = getNumber(grouped, "groupId")
+          if (groupId === undefined || groupId < 0) return yield* Effect.fail(new Error("Grouped setup could not create a session group in the selected browser"))
+        }
         const result = yield* Schema.decodeUnknownEffect(SessionGroupResponse)(yield* sessionGroup({ id: request.id, title: request.title, collapsed: true }, true))
         const blocked = result.groups.find(group => group.blocked)
         if (blocked) return yield* Effect.fail(new GroupedSetupBlocked(`Group setup blocked by ${blocked.blocked}`))
@@ -883,7 +895,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         return result
       }).pipe(Effect.mapError((error) => error instanceof GroupedSetupBlocked
         ? error
-        : new GroupedSetupBlocked(`Group verification failed: ${error.message}`))))
+        : new GroupedSetupBlocked(`Group verification failed: ${error.message}`))), request.browser === undefined ? undefined : { browser: request.browser })
       return { session: prepared.session, groups: prepared.result.groups }
     }),
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),

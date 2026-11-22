@@ -301,6 +301,8 @@ export const ConnectedBrowser = Schema.Struct({
   connected: Schema.Boolean,
   unresponsive: Schema.optionalKey(Schema.Boolean),
   version: Schema.NullOr(Schema.String),
+  /** The build reported by this browser (the top-level status describes only the default browser). */
+  build: Schema.optionalKey(Schema.NullOr(Schema.String)),
   tabs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 })
 
@@ -592,6 +594,8 @@ export interface ErrorEnvelope extends Schema.Schema.Type<typeof ErrorEnvelope> 
 /** Session-local controls cannot claim a user tab or focus a browser window. */
 export const SessionGroupRequest = Schema.Struct({ id: Schema.String, title: Schema.optionalKey(Schema.String), collapsed: Schema.optionalKey(Schema.Boolean) })
 export type SessionGroupRequest = Schema.Schema.Type<typeof SessionGroupRequest>
+export const SessionPrepareRequest = Schema.Struct({ id: Schema.String, title: Schema.String, browser: Schema.optionalKey(Schema.String) })
+export type SessionPrepareRequest = Schema.Schema.Type<typeof SessionPrepareRequest>
 export const SessionGroupResponse = Schema.Struct({ groups: Schema.Array(Schema.Struct({
   id: Schema.Number, windowId: Schema.Number, title: Schema.String, collapsed: Schema.Boolean,
   tabIds: Schema.Array(Schema.Number), blocked: Schema.optionalKey(Schema.String),

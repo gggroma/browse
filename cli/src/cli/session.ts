@@ -75,17 +75,18 @@ const sessionNew = Command.make(
 
 const sessionNewGrouped = Command.make("new-grouped", {
   id: Argument.String("id").pipe(Argument.withDescription("Owned lowercase session ID")),
-  title: Flag.String("title").pipe(Flag.withDescription("Display label: uppercase first letter of the agent's name (e.g., C, A, M)")),
-}, Effect.fn("Cli.sessionNewGrouped")(function* ({ id, title }) {
+  title: Flag.String("title").pipe(Flag.withDescription("Display label: C for Codex, Cp for GitHub Copilot, A for Antigravity, M for Mistral Vibe, or the agent's uppercase first letter")),
+  browser: Flag.String("browser").pipe(Flag.optional, Flag.withDescription("Connected browser id from `browse status --json`; omit for the default browser")),
+}, Effect.fn("Cli.sessionNewGrouped")(function* ({ id, title, browser }) {
   const relay = yield* RelayClient.Service
   yield* ensureCliRelayAndExtension()
   // Preserve the shared current session; callers must use the returned owned ID explicitly.
-  yield* emitJson(yield* relay.sessionPrepare({ id, title }))
+  yield* emitJson(yield* relay.sessionPrepare({ id, title, ...Option.match(browser, { onNone: () => ({}), onSome: (browser) => ({ browser }) }) }))
 })).pipe(Command.withDescription("Create an owned background session with a verified collapsed group"))
 
 const sessionGroup = Command.make("group", {
   id: Argument.String("id").pipe(Argument.withDescription("Owned lowercase session ID")),
-  title: Flag.String("title").pipe(Flag.optional, Flag.withDescription("Display label: uppercase first letter of the agent's name (e.g., C, A, M)")),
+  title: Flag.String("title").pipe(Flag.optional, Flag.withDescription("Display label: C for Codex, Cp for GitHub Copilot, A for Antigravity, M for Mistral Vibe, or the agent's uppercase first letter")),
   collapse: Flag.Boolean("collapse").pipe(Flag.withDefault(false)),
   expand: Flag.Boolean("expand").pipe(Flag.withDefault(false)),
 }, Effect.fn("Cli.sessionGroup")(function* ({ id, title, collapse, expand }) {

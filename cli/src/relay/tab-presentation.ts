@@ -151,6 +151,16 @@ export function createTabPresentation(options: {
     scheduleTabGrouping(tabId, target && pageStatusSessionId(target) ? "tabs.group" : "tabs.ungroup")
   }
 
+  /** Ensure the initial owned tab has finished any queued group change before grouped-session setup verifies it. */
+  async function ensureTabGrouping(tabId: number): Promise<void> {
+    if (!tabGroupingWorkers.has(tabId)) refreshTabGrouping(tabId)
+    while (true) {
+      const worker = tabGroupingWorkers.get(tabId)
+      if (!worker) return
+      await worker
+    }
+  }
+
   function refreshTabPresentation(tabId: number): void {
     refreshPageStatus(tabId)
     refreshTabGrouping(tabId)
@@ -364,6 +374,7 @@ export function createTabPresentation(options: {
     refreshPageStatus,
     scheduleTabGrouping,
     refreshTabGrouping,
+    ensureTabGrouping,
     refreshTabPresentation,
     clearPendingTabGrouping,
     cancelTargetHandoffs,

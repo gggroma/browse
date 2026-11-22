@@ -129,12 +129,12 @@ export class OpenCodeBrowserSessions {
   }
 
   /** Reserve the identity until the new blank page and its owned group are verified. */
-  prepareGrouped<A>(id: string, verify: () => Effect.Effect<A, Error>): Effect.Effect<{ session: SessionSummary; result: A }, Error> {
+  prepareGrouped<A>(id: string, verify: () => Effect.Effect<A, Error>, options?: Pick<SessionCreateOptions, "browser">): Effect.Effect<{ session: SessionSummary; result: A }, Error> {
     const manager = this
     return this.admission.withAdmission(id, this.admission.withIdentityChange(id, Effect.gen(function* () {
       if (manager.sessions.has(id)) return yield* sessionError("already-exists", `Session already exists: ${id}`, id)
       const session = manager.createOpenCodeBrowserSession(id, false)
-      const browser = yield* trySession(() => manager.resolveBrowser(undefined))
+      const browser = yield* trySession(() => manager.resolveBrowser(options?.browser))
       if (browser) session.browser = browser
       manager.preparing.add(id)
       manager.sessions.set(id, session)
