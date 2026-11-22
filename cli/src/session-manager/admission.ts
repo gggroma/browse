@@ -79,12 +79,16 @@ export class SessionAdmission {
     }
   }
 
-  withAdmission<A, E, R>(sessionId: string | undefined, effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | Error, R> {
+  withAdmission<A, E, R>(
+    sessionId: string | undefined,
+    effect: Effect.Effect<A, E, R>,
+    options: { readonly allowBlocked?: boolean } = {},
+  ): Effect.Effect<A, E | Error, R> {
     return Effect.acquireUseRelease(
       Effect.try({
         try: () => {
           this.assertAdmission()
-          if (sessionId && this.sessions.get(sessionId)?.groupBlocked) {
+          if (sessionId && !options.allowBlocked && this.sessions.get(sessionId)?.groupBlocked) {
             throw sessionError("inactive", `Session ${sessionId} is waiting for its group to be safely collapsed`, sessionId)
           }
           return this.retainWork(sessionId)

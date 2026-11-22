@@ -48,9 +48,11 @@ test("MCP session_group routes only owned physical tabs and preserves read-only 
     expect((await call("session_new_grouped", { id: "c-blocked", title: "C" })).isError).toBe(true)
     expect(JSON.stringify(await call("session_list", {}))).toContain("c-blocked")
     expect((await call("execute", { session: "c-blocked", code: "return 42" })).isError).toBe(true)
-    extension.on("session.group", command => ({ groups: [{ id: 7, windowId: 1, title: command.params?.title ?? "C", collapsed: true, tabIds: command.params?.tabIds }] }))
-    expect((await call("session_group", { session: "c-blocked", title: "C", collapsed: true })).isError).toBe(false)
     expect((await call("session_delete", { id: "c-blocked" })).isError).toBe(false)
+    expect((await call("session_new_grouped", { id: "c-blocked-2", title: "C" })).isError).toBe(true)
+    extension.on("session.group", command => ({ groups: [{ id: 7, windowId: 1, title: command.params?.title ?? "C", collapsed: true, tabIds: command.params?.tabIds }] }))
+    expect((await call("session_group", { session: "c-blocked-2", title: "C", collapsed: true })).isError).toBe(false)
+    expect((await call("session_delete", { id: "c-blocked-2" })).isError).toBe(false)
     next = 100
     for (const session of ["c-one", "c-two"]) {
       expect((await call("session_new", { id: session })).isError).toBe(false)

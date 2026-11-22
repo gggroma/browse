@@ -642,7 +642,7 @@ export class OpenCodeBrowserSessions {
         return true
       })))
       return { deleted, ...(stopped ? { stopped } : {}) }
-    }))
+    }), { allowBlocked: true })
   }
 
   reset(id: string): Effect.Effect<{ readonly session: SessionSummary; readonly stopped?: SessionStopReport } | undefined, Error> {
@@ -681,7 +681,7 @@ export class OpenCodeBrowserSessions {
         return sessionSummary(session, manager.hooks)
       })))
       return { session, ...(stopped ? { stopped } : {}) }
-    }))
+    }), { allowBlocked: true })
   }
 
   adoptedTargetId(id: string): string | undefined {

@@ -193,6 +193,24 @@ describe("AgentWindow.open with windows the browser doesn't show", () => {
     expect(stub.state.created).toHaveLength(0)
   })
 
+  test("reuses an existing main window via shallow query when populated getAll times out", async () => {
+    const user = await userTabWindow(100)
+    stub.state.lastFocusedWindowId = 9_999
+    const original = stub.chrome.windows.getAll
+    stub.chrome.windows.getAll = (options = {}) =>
+      options.populate ? new Promise<never>(() => {}) : original(options)
+    try {
+      const { tab, created, rule, normalWindows } = await AgentWindow.open("https://example.com/")
+      expect(tab.windowId).toBe(user.window.id)
+      expect(created).toBe(false)
+      expect(rule).toBe("fallback")
+      expect(normalWindows).toBe(1)
+      expect(stub.state.created).toHaveLength(0)
+    } finally {
+      stub.chrome.windows.getAll = original
+    }
+  })
+
   test("with no normal window, still makes one unfocused", async () => {
     const popup = await stub.chrome.windows.create({ type: "popup", url: "https://popup.example/", focused: false })
     stub.state.lastFocusedWindowId = popup.id

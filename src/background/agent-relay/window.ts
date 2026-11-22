@@ -151,8 +151,19 @@ async function chooseWindow(last: LastFocused): Promise<Choice> {
     chrome.windows.getAll({ windowTypes: ["normal"], populate: true }),
     WINDOW_QUERY_MS,
   ).catch(() => undefined)
-  if (queried === undefined || queried === TIMED_OUT)
-    return last.status === "window" ? { window: last.window, rule: "fallback" } : { rule: "created" }
+  if (queried === undefined || queried === TIMED_OUT) {
+    if (last.status === "window") return { window: last.window, rule: "fallback" }
+    // Lightweight lookup without `populate: true` still keeps tabs in an existing main normal window.
+    const shallow = await withTimeout(
+      chrome.windows.getAll({ windowTypes: ["normal"] }),
+      WINDOW_QUERY_MS,
+    ).catch(() => undefined)
+    if (Array.isArray(shallow) && shallow.length) {
+      const existing = shallow.find((window) => window.state !== "minimized") ?? shallow[0]
+      return existing?.id !== undefined ? { window: existing, rule: "fallback", normalWindows: shallow.length } : { rule: "created" }
+    }
+    return { rule: "created" }
+  }
   const windows = queried.filter((window) => window.id !== undefined)
   if (!windows.length)
     return last.status === "window" ? { window: last.window, rule: "fallback" } : { rule: "created" }

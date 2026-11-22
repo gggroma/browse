@@ -111,12 +111,16 @@ describe("grouping: one group per session", () => {
   beforeEach(() => stub.chrome.storage.local.set({ agentTabsGrouping: "session" }))
   test("runtime labels stay uppercase while concurrent sessions keep different groups", async () => {
     await userWindow()
+    const a = await agentTab("a-one")
     const c = await agentTab("c-one")
     const other = await agentTab("c-two")
+    const k = await agentTab("k-one")
     const m = await agentTab("m-one")
     expect(c.groupId).not.toBe(other.groupId)
+    expect(group(a.groupId)?.title).toBe(`A${MARKER}`)
     expect(group(c.groupId)?.title).toBe(`C${MARKER}`)
     expect(group(other.groupId)?.title).toBe(`C${MARKER}`)
+    expect(group(k.groupId)?.title).toBe(`K${MARKER}`)
     expect(group(m.groupId)?.title).toBe(`M${MARKER}`)
   })
 

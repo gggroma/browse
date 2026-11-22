@@ -141,7 +141,7 @@ export function autoNamed(sessionId: string | undefined) {
 export function groupTitle(sessionId: string | undefined, url?: string) {
   const host = url && /^https?:/.test(url) ? new URL(url).hostname.replace(/^www\./, "") : undefined
   // Never ending in the marker itself, which would read as the shared group.
-  const runtime = /^(c|m)(?:-|$)/.exec(sessionId ?? "")?.[1]?.toUpperCase()
+  const runtime = /^(a|c|k|m)(?:-|$)/.exec(sessionId ?? "")?.[1]?.toUpperCase()
   const name = runtime ?? (autoNamed(sessionId) ? (host ? `Agent · ${host}` : "Agent") : sessionId!.trim().replace(/\u2063+$/, ""))
   return `${name.length > 28 ? `${name.slice(0, 27)}…` : name}${GROUP_MARKER}`
 }

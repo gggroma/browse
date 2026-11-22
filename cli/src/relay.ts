@@ -848,7 +848,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       if (!preparing && request.collapsed === true) {
         const checked = yield* Schema.decodeUnknownEffect(SessionGroupResponse)({ groups })
-        if (checked.groups.length > 0 && checked.groups.every(group => group.collapsed && !group.blocked)) {
+        if (checked.groups.every(group => group.collapsed && !group.blocked)) {
           yield* sessions.releaseGroupBlock(request.id)
         }
       }
