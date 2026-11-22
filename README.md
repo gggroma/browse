@@ -1,5 +1,5 @@
 > This fork maintains the `dev-group-controls` branch.
-> Use the [fork build and Chrome update instructions](#fork-build-and-chrome-updates)
+> Use the [fork build and browser update instructions](#fork-build-and-browser-updates)
 > below for the enhanced version. Upstream install/update commands elsewhere in
 > this README install stock Browse and do not include these group controls.
 
@@ -389,8 +389,10 @@ displays `M`. Identical display labels never combine concurrent sessions.
 
 Build both components with the pinned Bun version and
 `bun scripts/build-local.ts`; the stock CLI build does not stamp the local identity. Load this checkout's `dist`
-as the unpacked "Browse-Agents" extension in the existing Chrome profile. Do not edit the
-store-managed extension files or copy a browser profile. A loaded local build
+as the unpacked "Browse-Agents" extension in the existing Chrome profile by
+default. The same build can be loaded in Opera when the user requests it or an
+account exists only there. Do not edit the store-managed extension files or
+copy a browser profile. A loaded local build
 is required: the stock extension advertises no `session-groups` capability.
 
 By default, `scripts/local-browse.ps1` selects the persistent runtime under
@@ -412,7 +414,7 @@ groups, explicit rename/expand/collapse, tab churn, normal form fill/Submit and
 complete tab/group cleanup. The user's selected tab remained unchanged. Both
 saved Codex and Vibe registrations advertised all 14 enhanced MCP tools.
 
-## Fork build and Chrome updates
+## Fork build and browser updates
 
 This branch preserves the previously tested TypeScript backend and adds explicit
 session group controls. The fork's upstream `dev` branch is separate and may
@@ -444,19 +446,25 @@ not reuse a build ID for different implementation code.
 ### Load the extension from this checkout
 
 The unpacked installation directory is the checkout's `dist` folder. The
-previous AI-folder copy is a legacy installation. Chrome Reload rereads the
-currently registered directory, so use **Load unpacked** for this one-time move.
+previous AI-folder copy is a legacy installation. Chrome and Opera Reload reread
+the currently registered directory, so use **Load unpacked** for the one-time
+move in each browser that needs this build. Chrome remains the default browser;
+load Opera only when requested or when the needed account exists only there.
 
 1. Build successfully using the commands above. Check the enhanced relay with
    `./scripts/local-browse.ps1 status --json` and wait until its browser work is
    idle before changing the installation.
-2. In the existing Chrome profile, open **Extensions > Manage Extensions**.
-   Enable **Developer mode**, click **Load unpacked**, and select
-   the checkout's `dist` folder. Chrome protects this management page from
-   the configured browser automation, so perform the folder selection in Chrome.
+2. In the selected browser profile (Chrome by default; Opera when selected), open
+   **Extensions > Manage Extensions** (`chrome://extensions` or
+   `opera://extensions`). Enable **Developer mode**, click **Load unpacked**,
+   and select the checkout's `dist` folder. The browser automation route cannot
+   navigate this management page; use the native browser UI. If the Windows
+   folder picker cannot be targeted as a separate modal window, stop and have
+   Roman select the verified `dist` folder. Do not send keyboard input until the
+   picker visibly has focus, since it can otherwise go to the browser address bar.
 3. Open **Details** for **Browse-Agents**. Verify its extension
    ID is `afeafocngkodbmaipcngoamamfmekgfo` and **Loaded from** points to the
-   checkout's `dist`. If Chrome refuses the load because the old copy has the
+   checkout's `dist`. If the browser refuses the load because an old copy has the
    same ID, confirm the old copy's path before removing it and loading the new
    folder. Removing the old registration can clear extension-local settings and
    require pairing again. Leave the stock Browse and ChatGPT extensions alone.
@@ -485,8 +493,9 @@ currently registered directory, so use **Load unpacked** for this one-time move.
    when its cause is resolved. The build ID must change for each runtime change.
 5. Check status and exercise the owned session/group controls, then clean up.
    If the initial extension is not installed or is disconnected and cannot
-   reconnect, use the one-time **Load unpacked** steps above. Chrome's Reload
-   remains a manual recovery option if the extension cannot receive commands.
+   reconnect, use the one-time **Load unpacked** steps above. The selected
+   browser's extension Reload remains a manual recovery option if the extension
+   cannot receive commands.
 
 Pairing normally survives Reload. If the extension is genuinely unpaired, run
 `bun scripts/prepare-local.ts` from the checkout while the isolated relay is
@@ -528,7 +537,7 @@ configuration instead of the newly calculated default so pairing is preserved.
 
 Codex registers this under `[mcp_servers.browse]` in `C:/Users/Roman/.codex/config.toml`, Antigravity under `"browse"` in `C:/Users/Roman/.gemini/config/mcp_config.json`, and Mistral Vibe under `[[mcp_servers]]` (`name = "browse"`) in `C:/Users/Roman/.vibe/config.toml`. Any other MCP-capable agent registers the same `node D:/Repositories/browse/cli/dist/cli.mjs mcp` command with the two `OPENCODE_BROWSER_*` env vars above. Preserve other config fields and credentials. Existing chats can cache old tool schemas: use the matching `./scripts/local-browse.ps1` immediately, or load the saved registration through a new chat or supported MCP refresh. Do not restart unrelated chats.
 
-The canonical browser-interactions skill remains in `~/.codex/skills/browser-interactions` (discovered by Antigravity via its `global-user-skills` junction and by Vibe through `skill_paths`). Browse Agents is the shared main-Chrome route for Codex, Antigravity, Mistral Vibe, and any other Browse-capable agent. Codex may use signed-in native ChatGPT Chrome under the shared skill's emergency rules. Native groups use the single U+1F50E icon where supported. Browse groups use the first uppercase letter of the agent's name (`C` for Codex, `A` for Antigravity, `M` for Mistral Vibe, `<FIRST_LETTER>` for any other agent). Keep explicit, unique lowercase session IDs starting with that matching letter on every Browse call, verify group state after tab churn, and close only owned tabs and sessions after browser work.
+The canonical browser-interactions skill remains in `~/.codex/skills/browser-interactions` (discovered by Antigravity via its `global-user-skills` junction and by Vibe through `skill_paths`). Browse Agents is the shared Chrome-default route for Codex, Antigravity, Mistral Vibe, and any other Browse-capable agent; select Opera explicitly when requested or when the needed account exists only there. Pass the chosen browser ID when creating a session. Codex may use signed-in native ChatGPT Chrome under the shared skill's emergency rules. Native groups use the single U+1F50E icon where supported. Browse groups use the first uppercase letter of the agent's name (`C` for Codex, `A` for Antigravity, `M` for Mistral Vibe, `<FIRST_LETTER>` for any other agent). Keep explicit, unique lowercase session IDs starting with that matching letter on every Browse call, verify group state after tab churn, and close only owned tabs and sessions after browser work.
 
 Do not publish directly to upstream. Push this development branch to the fork
 only after review and relevant checks; upstream synchronization is a separate
