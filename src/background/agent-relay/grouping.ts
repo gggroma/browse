@@ -52,6 +52,23 @@ export function createRelayGrouping(deps: {
 
   const serially = serialQueue()
 
+  /** Opera can resolve tabs.group before tabGroups publishes the new group to its other methods. */
+  const waitForGroup = async (groupId: number) => {
+    const deadline = Date.now() + 1_000
+    let lastError: unknown
+    do {
+      try {
+        return await chrome.tabGroups.get(groupId)
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith("No group with id:")) throw error
+        lastError = error
+        if (Date.now() >= deadline) break
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    } while (Date.now() < deadline)
+    throw lastError
+  }
+
   /** Undoes a group the relay made itself. A tab it is still responsible for keeps its idle tracking. */
   const undoGroup = (tabId: number) => TabCleanup.relayUngroup(tabId, () => chrome.tabs.ungroup(tabId).catch(() => undefined))
 
@@ -92,6 +109,11 @@ export function createRelayGrouping(deps: {
     } else {
       if (deps.currentSocket() !== current) throw new Error("The relay reconnected while grouping the tab")
       groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } })
+      if (deps.currentSocket() !== current) {
+        await undoGroup(tabId)
+        throw new Error("The relay reconnected while grouping the tab")
+      }
+      await waitForGroup(groupId)
       if (deps.currentSocket() !== current) {
         await undoGroup(tabId)
         throw new Error("The relay reconnected while grouping the tab")
@@ -142,6 +164,11 @@ export function createRelayGrouping(deps: {
     if (deps.currentSocket() !== current) throw new Error("The relay reconnected while grouping the tab")
     const groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } })
     // chrome.tabs.group changes the tab before it resolves, so a stale command undoes its anonymous group.
+    if (deps.currentSocket() !== current) {
+      await undoGroup(tabId)
+      throw new Error("The relay reconnected while grouping the tab")
+    }
+    await waitForGroup(groupId)
     if (deps.currentSocket() !== current) {
       await undoGroup(tabId)
       throw new Error("The relay reconnected while grouping the tab")
@@ -230,7 +257,7 @@ export function createRelayGrouping(deps: {
     const groups = []
     // Check every group before writing, including all of its members.
     for (const id of ids) {
-      const group = await chrome.tabGroups.get(id)
+      const group = await waitForGroup(id)
       const members = await chrome.tabs.query({ groupId: id })
       if (!ownedGroup(group.title) || sharedGroup(group.title) || group.shared || members.some(t => t.id === undefined || !allowed.has(t.id)))
         throw new Error("Group includes shared, user or another session's tabs")
@@ -251,7 +278,7 @@ export function createRelayGrouping(deps: {
         await chrome.storage.local.set({ [titlesKey]: Object.fromEntries(titles) })
         await chrome.tabGroups.update(group.id, { title: `${params.title}${GROUP_MARKER}` })
       }
-      const actual = await chrome.tabGroups.get(group.id)
+      const actual = await waitForGroup(group.id)
       const confirmedMembers = await chrome.tabs.query({ groupId: group.id })
       if (actual.shared || confirmedMembers.some(t => t.id === undefined || !allowed.has(t.id))) throw new Error("Group membership changed during update")
       if (members.length !== confirmedMembers.length || members.some(t => !confirmedMembers.some(current => current.id === t.id))) throw new Error("Group membership changed during update")

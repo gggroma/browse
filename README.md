@@ -56,7 +56,8 @@ launcher (Node 22+) that runs the native binary npm installed for your platform.
 2. **Adds the browse MCP server to your agents.** In a terminal you get a picker: OpenCode and the agents found on this
    computer start checked (your last choice next time). Type to search all supported agents, ↑/↓ to move, Space or Tab
    to toggle, Enter to confirm. An agent running `browse install` sets up itself. Without a terminal OpenCode is the
-   default. Edits keep the comments and formatting of each agent's config.
+   default. Edits keep the comments and formatting of each agent's config, and a config that's a symlink (a
+   dotfiles repo, Nix Home Manager) stays one: browse writes the file it points at.
 3. **Connects the extension.** If no browser has browse yet, install opens it in the Chrome Web Store; add it, and
    install pairs it once it's there. If a browser already has it, install opens its setup page with a one-time pairing
    code in the link, so it pairs without copying anything. Over SSH or without a display it prints a code instead.
@@ -220,7 +221,10 @@ extension from your browser to finish.
 - **Uploads.** Large files, or sites that reject copied files, work when the browser is on the same computer and the
   extension has "Allow access to file URLs" turned on in the browser's extensions page (browse → Details): that lets
   the extension read files on this computer, and browse only hands it files from its file roots. Otherwise browse
-  copies the files in, up to 50 MB per call.
+  copies the files in, up to 50 MB per call. Files that aren't on the relay's machine can be passed inline as base64
+  (`{ name, data }`): those always copy in and count toward the same 50 MB per-call aggregate cap as paths copied in.
+  The relay limits each HTTP request body to 16 MiB, so about 10 MB is a practical inline recommendation to leave room
+  for base64 expansion and JSON overhead. Mixing them with paths copies the paths in too.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new
   tabs open in the default browser unless `browser` names another.
 - **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),

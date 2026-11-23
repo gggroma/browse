@@ -124,6 +124,92 @@ describe("grouping: one group per session", () => {
     expect(group(m.groupId)?.title).toBe(`M${MARKER}`)
   })
 
+  test("group creation waits for Opera to publish group metadata before updating it", async () => {
+    await userWindow()
+    const originalGroup = stub.chrome.tabs.group
+    const originalGet = stub.chrome.tabGroups.get
+    const originalUpdate = stub.chrome.tabGroups.update
+    let createdGroup: number | undefined
+    let visibleAt = 0
+    stub.chrome.tabs.group = async (options) => {
+      const id = await originalGroup(options)
+      createdGroup = id
+      visibleAt = Date.now() + 30
+      return id
+    }
+    stub.chrome.tabGroups.get = async (id) => {
+      if (id === createdGroup && Date.now() < visibleAt) throw new Error(`No group with id: ${id}.`)
+      return originalGet(id)
+    }
+    stub.chrome.tabGroups.update = async (id, change) => {
+      if (id === createdGroup && Date.now() < visibleAt) throw new Error(`No group with id: ${id}.`)
+      return originalUpdate(id, change)
+    }
+    try {
+      const agent = await agentTab("c-opera-delay")
+      expect(group(agent.groupId)).toMatchObject({ title: `C${MARKER}`, collapsed: true })
+    } finally {
+      stub.chrome.tabs.group = originalGroup
+      stub.chrome.tabGroups.get = originalGet
+      stub.chrome.tabGroups.update = originalUpdate
+    }
+  })
+
+  test("session group controls retry when Opera briefly hides group metadata", async () => {
+    await userWindow()
+    const originalGet = stub.chrome.tabGroups.get
+    let createdGroup: number | undefined
+    let reads = 0
+    const originalGroup = stub.chrome.tabs.group
+    stub.chrome.tabs.group = async (options) => {
+      createdGroup = await originalGroup(options)
+      return createdGroup
+    }
+    stub.chrome.tabGroups.get = async (id) => {
+      if (id === createdGroup && ++reads === 4) throw new Error(`No group with id: ${id}.`)
+      return originalGet(id)
+    }
+    try {
+      const agent = await agentTab("c-opera-metadata-delay")
+      const result = await command("session.group", { sessionId: "c-opera-metadata-delay", tabIds: [agent.tabId], title: "C", collapsed: true })
+      expect(result.groups).toEqual([expect.objectContaining({ id: agent.groupId, title: "C", collapsed: true, tabIds: [agent.tabId] })])
+    } finally {
+      stub.chrome.tabs.group = originalGroup
+      stub.chrome.tabGroups.get = originalGet
+    }
+  })
+
+  test("group creation does not retry unrelated group metadata errors", async () => {
+    await userWindow()
+    const originalGroup = stub.chrome.tabs.group
+    const originalGet = stub.chrome.tabGroups.get
+    let createdGroup: number | undefined
+    let reads = 0
+    stub.chrome.tabs.group = async (options) => {
+      createdGroup = await originalGroup(options)
+      return createdGroup
+    }
+    stub.chrome.tabGroups.get = async (id) => {
+      if (id === createdGroup) {
+        reads++
+        throw new Error("group-read-permission-denied")
+      }
+      return originalGet(id)
+    }
+    try {
+      const { tabId } = (await command("tabs.create", { url: "https://example.com/", active: false })) as { tabId: number }
+      await command("debugger.attach", { tabId })
+      const id = nextCommand++
+      socket().deliver({ id, method: "tabs.group", params: { tabId, sessionId: "c-group-read-error" } })
+      await until(() => socket().received.some((message) => message.id === id))
+      expect(socket().received.find((message) => message.id === id)?.error).toContain("group-read-permission-denied")
+      expect(reads).toBe(1)
+    } finally {
+      stub.chrome.tabs.group = originalGroup
+      stub.chrome.tabGroups.get = originalGet
+    }
+  })
+
   test("session group controls rename durably and return collapse and membership", async () => {
     const { userTab } = await userWindow()
     const c = await agentTab("c-control")
